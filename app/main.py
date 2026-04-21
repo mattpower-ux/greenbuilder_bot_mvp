@@ -33,10 +33,12 @@ settings = get_settings()
 app = FastAPI(title="Green Builder Media Retrieval Bot", version="0.3.0")
 security = HTTPBasic()
 
+# Temporary open CORS for testing the HubSpot embed.
+# Once the bot is working, tighten this back down to your real domains.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -98,7 +100,7 @@ def chat(req: ChatRequest) -> ChatResponse:
     try:
         chunks = search(req.question)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=f"Search failed: {exc}") from exc
 
     if not chunks:
         response = ChatResponse(
