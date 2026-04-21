@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Tuple
 
 from app.config import get_settings
 from app.editorial_voice import GREEN_BUILDER_VOICE_GUIDE
-from app.openai_client import get_openai_client
+from app.openai_client import chat_completion
 
 
 def _voice_block() -> str:
@@ -65,24 +65,31 @@ def build_context(chunks: List[Dict[str, Any]]) -> str:
 
 
 def summarize_private_usage(chunks: List[Dict[str, Any]]) -> Tuple[bool, str | None]:
-    private_chunks = [c for c in chunks if c.get("visibility") == "private" and c.get("surface_policy") == "paraphrase"]
+    private_chunks = [
+        c
+        for c in chunks
+        if c.get("visibility") == "private"
+        and c.get("surface_policy") == "paraphrase"
+    ]
     if not private_chunks:
         return False, None
 
     labels = []
     seen = set()
     for chunk in private_chunks:
-        label = (chunk.get("attribution_label") or "Green Builder Media's internal editorial archive").strip()
+        label = (
+            chunk.get("attribution_label")
+            or "Green Builder Media's internal editorial archive"
+        ).strip()
         if label not in seen:
             labels.append(label)
             seen.add(label)
+
     joined = "; ".join(labels[:2])
     return True, joined
 
 
-
 def answer_question(question: str, chunks: List[Dict[str, Any]]) -> str:
-    client = get_openai_client()
     settings = get_settings()
     context = build_context(chunks)
 
@@ -101,12 +108,11 @@ Return a concise answer in markdown with:
 Do not fabricate any source or detail.
 """
 
-    response = client.responses.create(
-        model=settings.openai_chat_model,
-        input=[
+    answer = chat_completion(
+        messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0.15,
+        model=settings.openai_chat_model,
     )
-    return response.output_text.strip()
+    return answer.strip()
