@@ -1,0 +1,103 @@
+{
+  "document_count": 1673,
+  "surface_policy_counts": {
+    "paraphrase": 713,
+    "weight_only": 928,
+    "blocked": 32
+  },
+  "stale_counts": {
+    "fresh_or_unflagged": 772,
+    "stale": 901
+  },
+  "top_categories": [
+    [
+      "Uncategorized",
+      1564
+    ],
+    [
+      "News",
+      71
+    ],
+    [
+      "Blog",
+      9
+    ],
+    [
+      "Celestiaupdates",
+      7
+    ],
+    [
+      "Buildingscience",
+      6
+    ],
+    [
+      "Vision House Mariposa Meadows Blog",
+      4
+    ],
+    [
+      "Design",
+      3
+    ],
+    [
+      "Sara Gutterman",
+      2
+    ],
+    [
+      "Building Science",
+      2
+    ],
+    [
+      "Blogauthormatt Power",
+      1
+    ],
+    [
+      "Heating",
+      1
+    ],
+    [
+      "Resilient Housing",
+      1
+    ],
+    [
+      "Internet Of Things",
+      1
+    ],
+    [
+      "Ansi Approves Revised Resnet",
+      1
+    ]
+  ],
+  "top_years": [
+    [
+      "unknown",
+      1673
+    ]
+  ],
+  "sample_titles": [
+    "Simplicity: Durability's Counterpoint",
+    "A Closer Look: The Anti-LEED Movement",
+    "Tyrants and Monks",
+    "True Cost Economy",
+    "Home: Where the Hope Is",
+    "Better Than Net Zero VISION House",
+    "The IECC Stands Strong",
+    "The Internet of Things",
+    "Body-Sized HVAC Zoning",
+    "VISION House in INNOVENTIONS at Epcot Net Zero",
+    "Geothermal Heating and Cooling: Sharing Energy with Mother Earth",
+    "Natural Synergy",
+    "Case Study: Rheem in ReVISION House Orlando",
+    "Case Study: Rheem in VISION House Orlando",
+    "On a Clear Day",
+    "Homes: The New Digital Frontier",
+    "Banking on Solar Power",
+    "Separate Realities",
+    "The Fence Has Run Out of Room",
+    "Starting Over",
+    "Ocean of Innovation",
+    "Demanding HERS",
+    "Subtle Masterpiece",
+    "Reshaping the World at Davos?",
+    "Growing the Way to Building Green"
+  ]
+}
