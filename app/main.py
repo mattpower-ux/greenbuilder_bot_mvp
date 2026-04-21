@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 import secrets
 from pathlib import Path
 from typing import Optional
@@ -18,6 +21,16 @@ from app.retrieval import search
 
 settings = get_settings()
 app = FastAPI(title="Green Builder Media Retrieval Bot", version="0.3.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://www.greenbuildermedia.com",
+        "https://greenbuildermedia.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 security = HTTPBasic()
 
 app.add_middleware(
