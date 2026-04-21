@@ -14,6 +14,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+from fastapi.security import HTTPBasic
 security = HTTPBasic()
 import secrets
 from pathlib import Path
