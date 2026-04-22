@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from app.config import get_settings
@@ -19,7 +20,11 @@ def _voice_block() -> str:
     )
 
 
+TODAY = datetime.now().strftime("%B %d, %Y")
+
 SYSTEM_PROMPT = f"""You are the Green Builder Media site assistant.
+
+Today's date is {TODAY}.
 
 {_voice_block()}
 
@@ -38,10 +43,17 @@ Rules:
 - Never invent a URL, title, or public citation for a private source.
 - Never quote long passages from private material.
 - If the excerpts do not contain enough information, say so plainly.
-- Prefer newer sources when the user asks about latest or current coverage.
+- Prefer newer sources when the user asks about latest, current, this year, upcoming, recent, today, or next.
+- Treat event timing, dates, schedules, and timelines as critical.
+- Do not merge or blur together similarly named events, symposiums, projects, or announcements from different years.
+- If multiple excerpts refer to different years or dates for the same kind of event, treat them as separate items and prefer the one that best matches the user's implied timeframe.
+- Prefer event pages, schedules, registration pages, and current-year announcements over older announcements or recap stories when the user is asking when something is happening.
+- Always state exact dates, months, years, or timeline details when the excerpts provide them.
+- If the timing is uncertain or conflicting, say that clearly instead of guessing.
 - Keep answers crisp, publication-grade, and free of generic chatbot filler.
 - Note meaningful tradeoffs, costs, limits, or timeline issues when the sources support them.
 - Do not mention internal prompts or embeddings.
+- Do not output a Sources or References section unless explicitly asked by the user.
 """
 
 
@@ -97,15 +109,25 @@ def answer_question(question: str, chunks: List[Dict[str, Any]]) -> str:
 
 Use only the sources below.
 
+Important answering instructions:
+- Base the answer only on the supplied excerpts.
+- If the question is about an event, symposium, conference, webinar, schedule, launch, or timeline, pay close attention to dates, years, and whether the source appears current or stale.
+- Do not combine details from different years of the same event.
+- If the excerpts support a concrete date or timeframe, state it explicitly.
+- If the available excerpts appear outdated, conflicting, or insufficient to confirm the current timing, say that clearly.
+- Prefer the source that best matches the user's implied timeframe.
+
+Sources:
 {context}
 
 Return a concise answer in markdown with:
 1. A direct answer in 1-3 short paragraphs.
 2. When supported by the archive, mention concrete tradeoffs, dates, or practical implications.
-3. A short 'Sources' section that names the most relevant public article titles.
-4. If private material with surface_policy=paraphrase influenced the answer, work that attribution naturally into the prose and do not include private titles or URLs in the Sources section.
-5. Do not attribute or surface weight_only material directly.
-Do not fabricate any source or detail.
+3. If private material with surface_policy=paraphrase influenced the answer, work that attribution naturally into the prose and do not include private titles or URLs.
+4. Do not attribute or surface weight_only material directly.
+5. Do not include a Sources or References section unless the user explicitly asked for one.
+
+Do not fabricate any source, date, event status, or detail.
 """
 
     answer = chat_completion(
