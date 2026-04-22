@@ -108,50 +108,85 @@ def is_future_event_query(question: str) -> bool:
     return any(term in q for term in FUTURE_EVENT_TERMS)
 
 
-def parse_event_date_from_text(text: str) -> date | None:
-    if not text:
+def parse_single_event_date(raw: str) -> date | None:
+    if not raw:
         return None
 
-    for pattern in DATE_PATTERNS:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if not match:
-            continue
+    raw = re.sub(
+        r"(\b[A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*\d{1,2},\s+(\d{4})",
+        r"\1 \2, \3",
+        raw,
+    )
 
-        raw = match.group(0)
-
-        # Convert "June 5-6, 2026" or "June 5–6, 2026" -> "June 5, 2026"
-        raw = re.sub(
-            r"(\b[A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*\d{1,2},\s+(\d{4})",
-            r"\1 \2, \3",
-            raw,
-        )
-
-        for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
-            try:
-                return datetime.strptime(raw, fmt).date()
-            except ValueError:
-                pass
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            pass
 
     return None
 
 
-def extract_best_event_date(chunk: dict[str, Any]) -> date | None:
-    candidates = [
-        chunk.get("event_date"),
-        chunk.get("event_start_date"),
-        chunk.get("published_at"),
-        chunk.get("title"),
-        chunk.get("text"),
-    ]
+def extract_all_event_dates_from_text(text: str) -> list[date]:
+    if not text:
+        return []
 
-    for candidate in candidates:
-        if not candidate:
-            continue
+    found_dates: list[date] = []
 
-        if isinstance(candidate, str):
-            parsed = parse_event_date_from_text(candidate)
+    for pattern in DATE_PATTERNS:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            parsed = parse_single_event_date(match.group(0))
             if parsed:
-                return parsed
+                found_dates.append(parsed)
+
+    unique_dates: list[date] = []
+    seen = set()
+    for d in found_dates:
+        if d not in seen:
+            unique_dates.append(d)
+            seen.add(d)
+
+    return unique_dates
+
+
+def extract_future_event_dates(chunk: dict[str, Any]) -> list[date]:
+    future_dates: list[date] = []
+
+    # Prefer explicit event fields first
+    for field in ("event_date", "event_start_date"):
+        value = chunk.get(field)
+        if isinstance(value, str):
+            parsed = parse_single_event_date(value)
+            if parsed and parsed >= TODAY:
+                future_dates.append(parsed)
+
+    # Then search title and article/excerpt text for all dates
+    for field in ("title", "text"):
+        value = chunk.get(field)
+        if isinstance(value, str):
+            for parsed in extract_all_event_dates_from_text(value):
+                if parsed >= TODAY:
+                    future_dates.append(parsed)
+
+    unique_dates: list[date] = []
+    seen = set()
+    for d in future_dates:
+        if d not in seen:
+            unique_dates.append(d)
+            seen.add(d)
+
+    return sorted(unique_dates)
+
+
+def extract_best_event_date(chunk: dict[str, Any]) -> date | None:
+    future_dates = extract_future_event_dates(chunk)
+    if future_dates:
+        return future_dates[0]
+
+    # Only use published_at as a fallback if no future event date was found
+    published_at = chunk.get("published_at")
+    if isinstance(published_at, str):
+        return parse_single_event_date(published_at)
 
     return None
 
@@ -160,13 +195,15 @@ def filter_to_future_event_chunks(chunks: list[dict[str, Any]]) -> list[dict[str
     future_chunks: list[dict[str, Any]] = []
 
     for chunk in chunks:
-        event_date = extract_best_event_date(chunk)
-        if event_date and event_date >= TODAY:
-            future_chunks.append(chunk)
+        future_dates = extract_future_event_dates(chunk)
+        if future_dates:
+            enriched = dict(chunk)
+            enriched["_next_future_event_date"] = future_dates[0].isoformat()
+            future_chunks.append(enriched)
 
     return sorted(
         future_chunks,
-        key=lambda c: extract_best_event_date(c) or date.max,
+        key=lambda c: c.get("_next_future_event_date", "9999-12-31"),
     )
 
 
