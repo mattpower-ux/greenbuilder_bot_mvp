@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import secrets
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+import gspread
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from google.oauth2.service_account import Credentials
 
 from app.admin_ui import HTML as ADMIN_HTML
 from app.config import get_settings
@@ -105,6 +109,86 @@ def admin_auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:
     return credentials.username
 
 
+def get_google_sheet():
+    raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    sheet_id = os.getenv("GOOGLE_SHEET_ID", "").strip()
+
+    if not raw_json:
+        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON environment variable.")
+    if not sheet_id:
+        raise RuntimeError("Missing GOOGLE_SHEET_ID environment variable.")
+
+    service_account_info = json.loads(raw_json)
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    credentials = Credentials.from_service_account_info(
+        service_account_info,
+        scopes=scopes,
+    )
+
+    client = gspread.authorize(credentials)
+    spreadsheet = client.open_by_key(sheet_id)
+    worksheet = spreadsheet.sheet1
+    return worksheet
+
+
+def ensure_sheet_header(worksheet) -> None:
+    expected_header = [
+        "timestamp_utc",
+        "session_id",
+        "page_url",
+        "referrer",
+        "user_agent",
+        "event_query",
+        "question",
+        "answer",
+        "sources_json",
+        "private_archive_used",
+        "attribution_note",
+        "correction_applied",
+        "correction_id",
+    ]
+
+    existing_header = worksheet.row_values(1)
+    if existing_header != expected_header:
+        worksheet.update("A1:M1", [expected_header])
+
+
+def log_to_google_sheet(payload: dict) -> None:
+    worksheet = get_google_sheet()
+    ensure_sheet_header(worksheet)
+
+    row = [
+        datetime.utcnow().isoformat(),
+        payload.get("session_id", "") or "",
+        payload.get("page_url", "") or "",
+        payload.get("referrer", "") or "",
+        payload.get("user_agent", "") or "",
+        str(payload.get("event_query", False)),
+        payload.get("question", "") or "",
+        payload.get("answer", "") or "",
+        json.dumps(payload.get("public_sources", []), ensure_ascii=False),
+        str(payload.get("private_archive_used", False)),
+        payload.get("attribution_note", "") or "",
+        str(payload.get("correction_applied", False)),
+        payload.get("correction_id", "") or "",
+    ]
+
+    worksheet.append_row(row, value_input_option="RAW")
+
+
+def append_log_everywhere(payload: dict) -> None:
+    append_log(payload)
+    try:
+        log_to_google_sheet(payload)
+    except Exception as exc:
+        print(f"Google Sheets logging failed: {exc}")
+
+
 def is_future_event_query(question: str) -> bool:
     q = (question or "").lower()
     return any(term in q for term in FUTURE_EVENT_TERMS)
@@ -190,7 +274,6 @@ def extract_future_event_dates(chunk: dict[str, Any]) -> list[date]:
     future_dates: list[date] = []
     published_year = parse_published_year(chunk.get("published_at")) or TODAY.year
 
-    # Prefer explicit event fields first
     for field in ("event_date", "event_start_date"):
         value = chunk.get(field)
         if isinstance(value, str):
@@ -198,7 +281,6 @@ def extract_future_event_dates(chunk: dict[str, Any]) -> list[date]:
             if parsed and parsed >= TODAY:
                 future_dates.append(parsed)
 
-    # Then search title and article/excerpt text for all dates
     for field in ("title", "text"):
         value = chunk.get(field)
         if isinstance(value, str):
@@ -267,7 +349,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             correction_note=correction.get("editor_note")
             or f"Editor override by {correction.get('editor_name') or 'editor'}",
         )
-        append_log(
+        append_log_everywhere(
             {
                 "question": req.question,
                 "session_id": req.session_id,
@@ -301,7 +383,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 ),
                 sources=[],
             )
-            append_log(
+            append_log_everywhere(
                 {
                     "question": req.question,
                     "session_id": req.session_id,
@@ -321,7 +403,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             answer="I couldn't find relevant Green Builder Media content for that question.",
             sources=[],
         )
-        append_log(
+        append_log_everywhere(
             {
                 "question": req.question,
                 "session_id": req.session_id,
@@ -375,7 +457,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         attribution_note=attribution_note,
     )
 
-    append_log(
+    append_log_everywhere(
         {
             "question": req.question,
             "session_id": req.session_id,
