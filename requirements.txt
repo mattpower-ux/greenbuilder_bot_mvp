@@ -10,3 +10,5 @@ python-dotenv==1.0.1
 pydantic==2.9.2
 openai==1.51.0
 orjson==3.10.7
+gspread==6.1.2
+google-auth==2.35.0
