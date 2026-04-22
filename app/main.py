@@ -80,6 +80,8 @@ MONTH_PATTERN = (
 DATE_PATTERNS = [
     rf"\b({MONTH_PATTERN})\s+\d{{1,2}},\s+\d{{4}}\b",
     rf"\b({MONTH_PATTERN})\s+\d{{1,2}}\s*[-–—]\s*\d{{1,2}},\s+\d{{4}}\b",
+    rf"\b({MONTH_PATTERN})\s+\d{{1,2}}\b",
+    rf"\b({MONTH_PATTERN})\s+\d{{1,2}}\s*[-–—]\s*\d{{1,2}}\b",
     r"\b\d{4}-\d{2}-\d{2}\b",
     r"\b\d{1,2}/\d{1,2}/\d{4}\b",
 ]
@@ -108,13 +110,40 @@ def is_future_event_query(question: str) -> bool:
     return any(term in q for term in FUTURE_EVENT_TERMS)
 
 
-def parse_single_event_date(raw: str) -> date | None:
+def parse_published_year(published_at: str | None) -> int | None:
+    if not published_at:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+        return dt.year
+    except Exception:
+        pass
+
+    match = re.search(r"\b(20\d{2}|19\d{2})\b", published_at)
+    if match:
+        return int(match.group(1))
+
+    return None
+
+
+def parse_single_event_date(raw: str, default_year: int | None = None) -> date | None:
     if not raw:
         return None
 
+    raw = raw.strip()
+
+    # Convert "June 5-6, 2026" or "June 5–6, 2026" -> "June 5, 2026"
     raw = re.sub(
         r"(\b[A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*\d{1,2},\s+(\d{4})",
         r"\1 \2, \3",
+        raw,
+    )
+
+    # Convert "June 5-6" or "June 5–6" -> "June 5"
+    raw = re.sub(
+        r"(\b[A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*\d{1,2}",
+        r"\1 \2",
         raw,
     )
 
@@ -124,10 +153,18 @@ def parse_single_event_date(raw: str) -> date | None:
         except ValueError:
             pass
 
+    if default_year is not None:
+        for fmt in ("%B %d", "%b %d"):
+            try:
+                partial = datetime.strptime(raw, fmt)
+                return date(default_year, partial.month, partial.day)
+            except ValueError:
+                pass
+
     return None
 
 
-def extract_all_event_dates_from_text(text: str) -> list[date]:
+def extract_all_event_dates_from_text(text: str, default_year: int | None = None) -> list[date]:
     if not text:
         return []
 
@@ -135,7 +172,7 @@ def extract_all_event_dates_from_text(text: str) -> list[date]:
 
     for pattern in DATE_PATTERNS:
         for match in re.finditer(pattern, text, re.IGNORECASE):
-            parsed = parse_single_event_date(match.group(0))
+            parsed = parse_single_event_date(match.group(0), default_year=default_year)
             if parsed:
                 found_dates.append(parsed)
 
@@ -151,12 +188,13 @@ def extract_all_event_dates_from_text(text: str) -> list[date]:
 
 def extract_future_event_dates(chunk: dict[str, Any]) -> list[date]:
     future_dates: list[date] = []
+    published_year = parse_published_year(chunk.get("published_at")) or TODAY.year
 
     # Prefer explicit event fields first
     for field in ("event_date", "event_start_date"):
         value = chunk.get(field)
         if isinstance(value, str):
-            parsed = parse_single_event_date(value)
+            parsed = parse_single_event_date(value, default_year=published_year)
             if parsed and parsed >= TODAY:
                 future_dates.append(parsed)
 
@@ -164,7 +202,7 @@ def extract_future_event_dates(chunk: dict[str, Any]) -> list[date]:
     for field in ("title", "text"):
         value = chunk.get(field)
         if isinstance(value, str):
-            for parsed in extract_all_event_dates_from_text(value):
+            for parsed in extract_all_event_dates_from_text(value, default_year=published_year):
                 if parsed >= TODAY:
                     future_dates.append(parsed)
 
@@ -183,7 +221,6 @@ def extract_best_event_date(chunk: dict[str, Any]) -> date | None:
     if future_dates:
         return future_dates[0]
 
-    # Only use published_at as a fallback if no future event date was found
     published_at = chunk.get("published_at")
     if isinstance(published_at, str):
         return parse_single_event_date(published_at)
