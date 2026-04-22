@@ -79,8 +79,9 @@ MONTH_PATTERN = (
 
 DATE_PATTERNS = [
     rf"\b({MONTH_PATTERN})\s+\d{{1,2}},\s+\d{{4}}\b",
-    rf"\b({MONTH_PATTERN})\s+\d{{1,2}}-\d{{1,2}},\s+\d{{4}}\b",
+    rf"\b({MONTH_PATTERN})\s+\d{{1,2}}\s*[-–—]\s*\d{{1,2}},\s+\d{{4}}\b",
     r"\b\d{4}-\d{2}-\d{2}\b",
+    r"\b\d{1,2}/\d{1,2}/\d{4}\b",
 ]
 
 
@@ -118,14 +119,14 @@ def parse_event_date_from_text(text: str) -> date | None:
 
         raw = match.group(0)
 
-        # Convert "June 5-6, 2026" -> "June 5, 2026"
+        # Convert "June 5-6, 2026" or "June 5–6, 2026" -> "June 5, 2026"
         raw = re.sub(
-            r"(\b[A-Za-z]+)\s+(\d{1,2})-\d{1,2},\s+(\d{4})",
+            r"(\b[A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*\d{1,2},\s+(\d{4})",
             r"\1 \2, \3",
             raw,
         )
 
-        for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"):
+        for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
             try:
                 return datetime.strptime(raw, fmt).date()
             except ValueError:
@@ -157,30 +158,16 @@ def extract_best_event_date(chunk: dict[str, Any]) -> date | None:
 
 def filter_to_future_event_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     future_chunks: list[dict[str, Any]] = []
-    undated_chunks: list[dict[str, Any]] = []
 
     for chunk in chunks:
         event_date = extract_best_event_date(chunk)
-        if event_date is None:
-            undated_chunks.append(chunk)
-            continue
-
-        if event_date >= TODAY:
+        if event_date and event_date >= TODAY:
             future_chunks.append(chunk)
 
-    # Best case: confirmed future-dated chunks only
-    if future_chunks:
-        return sorted(
-            future_chunks,
-            key=lambda c: extract_best_event_date(c) or date.max,
-        )
-
-    # Next best: undated chunks only, instead of clearly past ones
-    if undated_chunks:
-        return undated_chunks
-
-    # Fallback: original chunks if everything was dated in the past
-    return chunks
+    return sorted(
+        future_chunks,
+        key=lambda c: extract_best_event_date(c) or date.max,
+    )
 
 
 @app.get("/health")
@@ -223,8 +210,27 @@ def chat(req: ChatRequest) -> ChatResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Search failed: {exc}") from exc
 
-    if is_future_event_query(req.question):
+    future_query = is_future_event_query(req.question)
+    if future_query:
         chunks = filter_to_future_event_chunks(chunks)
+
+        if not chunks:
+            response = ChatResponse(
+                answer=(
+                    "I’m not seeing any confirmed future conferences in the current Green Builder Media excerpts. "
+                    "The available event-related content appears to be past or undated, so I can’t verify an upcoming conference from the retrieved material."
+                ),
+                sources=[],
+            )
+            append_log(
+                {
+                    "question": req.question,
+                    "answer": response.answer,
+                    "public_sources": [],
+                    "private_archive_used": False,
+                }
+            )
+            return response
 
     if not chunks:
         response = ChatResponse(
