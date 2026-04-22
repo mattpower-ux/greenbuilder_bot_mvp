@@ -15,6 +15,34 @@ from app.openai_client import get_openai_client
 WORD_RE = re.compile(r"[a-zA-Z0-9']+")
 TABLE_NAME = "greenbuilder_chunks"
 
+EVENT_TERMS = {
+    "conference",
+    "conferences",
+    "event",
+    "events",
+    "summit",
+    "summits",
+    "symposium",
+    "symposiums",
+    "expo",
+    "webinar",
+    "webinars",
+    "calendar",
+    "schedule",
+    "upcoming",
+    "coming",
+    "save",
+    "date",
+}
+
+HIGH_VALUE_EVENT_PHRASES = [
+    "sustainability symposium",
+    "save the date",
+    "next generation water summit",
+    "conference & expo",
+    "conference and expo",
+]
+
 
 def tokenize(text: str) -> List[str]:
     return [t.lower() for t in WORD_RE.findall(text)]
@@ -63,7 +91,9 @@ def get_table():
 
 def _policy_bonus(item: Dict[str, Any]) -> float:
     visibility = item.get("visibility", "public")
-    policy = item.get("surface_policy") or ("paraphrase" if visibility == "private" else "public")
+    policy = item.get("surface_policy") or (
+        "paraphrase" if visibility == "private" else "public"
+    )
     if policy == "blocked":
         return -10.0
     if policy == "weight_only":
@@ -73,31 +103,129 @@ def _policy_bonus(item: Dict[str, Any]) -> float:
     return 0.0
 
 
+def is_event_query(question: str) -> bool:
+    q_tokens = set(tokenize(question))
+    if q_tokens & EVENT_TERMS:
+        return True
+
+    q = (question or "").lower()
+    return any(phrase in q for phrase in HIGH_VALUE_EVENT_PHRASES)
+
+
+def combined_search_text(item: Dict[str, Any]) -> str:
+    title = item.get("title", "") or ""
+    text = item.get("text", "") or ""
+    url = item.get("url", "") or ""
+    attribution = item.get("attribution_label", "") or ""
+
+    return "\n".join(
+        part for part in [title, text, url, attribution] if part
+    )
+
+
+def title_match_bonus(question: str, item: Dict[str, Any]) -> float:
+    q = (question or "").lower()
+    title = (item.get("title", "") or "").lower()
+
+    if not title:
+        return 0.0
+
+    bonus = 0.0
+
+    # Exact phrase bonus for very important event names
+    for phrase in HIGH_VALUE_EVENT_PHRASES:
+        if phrase in q and phrase in title:
+            bonus += 0.22
+
+    # Title-level token overlap
+    title_overlap = keyword_overlap_score(question, title)
+    bonus += title_overlap * 0.18
+
+    return bonus
+
+
+def event_bonus(question: str, item: Dict[str, Any]) -> float:
+    if not is_event_query(question):
+        return 0.0
+
+    haystack = combined_search_text(item).lower()
+    bonus = 0.0
+
+    # General event vocabulary
+    if "conference" in haystack:
+        bonus += 0.04
+    if "summit" in haystack:
+        bonus += 0.04
+    if "symposium" in haystack:
+        bonus += 0.08
+    if "expo" in haystack:
+        bonus += 0.03
+    if "webinar" in haystack:
+        bonus += 0.03
+    if "save the date" in haystack:
+        bonus += 0.08
+    if "schedule" in haystack or "calendar" in haystack:
+        bonus += 0.03
+
+    # High-value GBM event phrase bonus
+    for phrase in HIGH_VALUE_EVENT_PHRASES:
+        if phrase in haystack:
+            bonus += 0.12
+
+    # If the user asked specifically about the sustainability symposium,
+    # reward exact mention anywhere in the chunk.
+    q = (question or "").lower()
+    if "sustainability symposium" in q and "sustainability symposium" in haystack:
+        bonus += 0.35
+
+    return bonus
+
+
 def search(question: str) -> List[Dict[str, Any]]:
     settings = get_settings()
     table = get_table()
     embedding = embed_query(question)
-    df = table.search(embedding).limit(settings.top_k * 5).to_pandas()
+
+    # Pull a wider candidate set before rescoring so buried event chunks
+    # have a better chance to surface.
+    candidate_limit = max(settings.top_k * 8, settings.max_context_chunks * 8)
+
+    df = table.search(embedding).limit(candidate_limit).to_pandas()
     records = df.to_dict(orient="records")
 
     rescored: List[Dict[str, Any]] = []
     for item in records:
         if item.get("surface_policy") == "blocked":
             continue
-        text = item.get("text", "")
+
+        search_text = combined_search_text(item)
         vector_distance = float(item.get("_distance", 0.0))
         semantic_score = 1.0 / (1.0 + vector_distance)
-        keyword_score = keyword_overlap_score(question, text)
+        keyword_score = keyword_overlap_score(question, search_text)
         freshness = recency_boost(item.get("published_at"))
-        final_score = semantic_score * 0.62 + keyword_score * 0.23 + freshness * 0.10 + _policy_bonus(item)
+        title_bonus = title_match_bonus(question, item)
+        topical_event_bonus = event_bonus(question, item)
+
+        final_score = (
+            semantic_score * 0.56
+            + keyword_score * 0.24
+            + freshness * 0.08
+            + title_bonus
+            + topical_event_bonus
+            + _policy_bonus(item)
+        )
+
         if isinstance(item.get("stale_reasons"), str):
             import json
             try:
                 item["stale_reasons"] = json.loads(item["stale_reasons"])
             except Exception:
                 item["stale_reasons"] = [item["stale_reasons"]]
+
+        # Penalize stale content, but not so heavily that it wipes out a highly relevant chunk.
         if item.get("stale"):
-            final_score -= 0.03
+            final_score -= 0.02
+
         item["score"] = round(final_score, 6)
         rescored.append(item)
 
