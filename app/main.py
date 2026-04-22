@@ -270,6 +270,11 @@ def chat(req: ChatRequest) -> ChatResponse:
         append_log(
             {
                 "question": req.question,
+                "session_id": req.session_id,
+                "page_url": req.page_url,
+                "referrer": req.referrer,
+                "user_agent": req.user_agent,
+                "event_query": is_future_event_query(req.question),
                 "answer": response.answer,
                 "public_sources": [],
                 "private_archive_used": False,
@@ -299,6 +304,11 @@ def chat(req: ChatRequest) -> ChatResponse:
             append_log(
                 {
                     "question": req.question,
+                    "session_id": req.session_id,
+                    "page_url": req.page_url,
+                    "referrer": req.referrer,
+                    "user_agent": req.user_agent,
+                    "event_query": future_query,
                     "answer": response.answer,
                     "public_sources": [],
                     "private_archive_used": False,
@@ -314,6 +324,11 @@ def chat(req: ChatRequest) -> ChatResponse:
         append_log(
             {
                 "question": req.question,
+                "session_id": req.session_id,
+                "page_url": req.page_url,
+                "referrer": req.referrer,
+                "user_agent": req.user_agent,
+                "event_query": future_query,
                 "answer": response.answer,
                 "public_sources": [],
                 "private_archive_used": False,
@@ -363,6 +378,11 @@ def chat(req: ChatRequest) -> ChatResponse:
     append_log(
         {
             "question": req.question,
+            "session_id": req.session_id,
+            "page_url": req.page_url,
+            "referrer": req.referrer,
+            "user_agent": req.user_agent,
+            "event_query": future_query,
             "answer": response.answer,
             "public_sources": [s.model_dump() for s in response.sources],
             "private_archive_used": private_used,
