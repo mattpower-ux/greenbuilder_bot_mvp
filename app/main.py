@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -52,7 +51,6 @@ app.add_middleware(
 )
 
 TODAY = date.today()
-DAILY_CRAWL_INTERVAL_SECONDS = 60 * 60 * 24
 
 FUTURE_EVENT_TERMS = [
     "coming up",
@@ -189,42 +187,6 @@ def append_log_everywhere(payload: dict) -> None:
         log_to_google_sheet(payload)
     except Exception as exc:
         print(f"Google Sheets logging failed: {exc}")
-
-
-async def run_crawl_and_reindex_once() -> None:
-    """
-    Run the site crawl and index rebuild inside the same service so it uses
-    the same environment and storage as the live app.
-    """
-    print("Starting scheduled crawl + index rebuild...")
-
-    # Import inside the function to avoid circular/import-time issues.
-    from crawl_greenbuilder import main as crawl_main
-    from build_index import main as build_main
-
-    await crawl_main()
-    build_main()
-
-    print("Scheduled crawl + index rebuild completed.")
-
-
-async def run_daily_crawl_loop() -> None:
-    """
-    Run once on startup, then every 24 hours.
-    """
-    while True:
-        try:
-            await run_crawl_and_reindex_once()
-        except Exception as exc:
-            print(f"Scheduled crawl + index rebuild failed: {exc}")
-
-        await asyncio.sleep(DAILY_CRAWL_INTERVAL_SECONDS)
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    # Start the crawl loop in the background so the API can still serve traffic.
-    asyncio.create_task(run_daily_crawl_loop())
 
 
 def is_future_event_query(question: str) -> bool:
