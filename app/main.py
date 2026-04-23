@@ -199,8 +199,8 @@ async def run_crawl_and_reindex_once() -> None:
     print("Starting scheduled crawl + index rebuild...")
 
     # Import inside the function to avoid circular/import-time issues.
-    from crawl_greenbuilder import main as crawl_main
-    from build_index import main as build_main
+    from app.crawl_greenbuilder import main as crawl_main
+    from app.build_index import main as build_main
 
     await crawl_main()
     build_main()
