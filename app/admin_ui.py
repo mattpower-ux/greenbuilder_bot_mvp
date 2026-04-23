@@ -9,128 +9,40 @@ HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body { font-family: Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
-    header { background: #0f766e; color: white; padding: 16px 20px; }
+    header { background: #0f766e; color: white; padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .header-title { font-weight: 700; }
+    .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .header-btn { background: #ffffff; color: #0f766e; border: 0; border-radius: 10px; padding: 9px 12px; cursor: pointer; font-weight: 700; }
+    .header-btn.secondary { background: rgba(255,255,255,.18); color: #ffffff; border: 1px solid rgba(255,255,255,.55); }
+    #rebuild-status { color: #ffffff; font-size: 13px; max-width: 320px; }
     main { max-width: 1100px; margin: 0 auto; padding: 20px; }
     .grid { display: grid; gap: 18px; grid-template-columns: 1.2fr .8fr; }
     .card { background: white; border-radius: 14px; box-shadow: 0 8px 24px rgba(15,23,42,.08); padding: 16px; }
-    textarea, input, select { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 10px; }
+    textarea, input, select { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 10px; box-sizing: border-box; }
     textarea { min-height: 120px; }
-    <div style="margin: 20px 0; padding: 16px; border: 1px solid #ccc; border-radius: 8px;">
-  <h3 style="margin-top: 0;">Index Rebuild</h3>
-  <button id="rebuild-index-btn" style="
-    background: #218682;
-    color: white;
-    border: none;
-    padding: 10px 16px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-weight: 600;
-  ">
-    Rebuild Index
-  </button>
-  <button id="check-rebuild-status-btn" style="
-    background: #444;
-    color: white;
-    border: none;
-    padding: 10px 16px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-weight: 600;
-    margin-left: 10px;
-  ">
-    Check Status
-  </button>
-  <div id="rebuild-status" style="margin-top: 12px; font-family: Arial, sans-serif;"></div>
-</div>
-
-<script>
-async function rebuildIndex() {
-  const statusEl = document.getElementById("rebuild-status");
-  statusEl.textContent = "Starting rebuild...";
-
-  try {
-    const res = await fetch("/api/admin/rebuild-index", {
-      method: "POST",
-      credentials: "same-origin"
-    });
-
-    const data = await res.json();
-    statusEl.textContent = data.message || "Rebuild started.";
-
-    pollRebuildStatus();
-  } catch (err) {
-    statusEl.textContent = "Error starting rebuild: " + err.message;
-  }
-}
-
-async function checkRebuildStatus() {
-  const statusEl = document.getElementById("rebuild-status");
-
-  try {
-    const res = await fetch("/api/admin/rebuild-index-status", {
-      method: "GET",
-      credentials: "same-origin"
-    });
-
-    const data = await res.json();
-
-    if (data.status === "running") {
-      statusEl.textContent = "Index rebuild is running...";
-    } else if (data.status === "completed") {
-      statusEl.textContent = "Index rebuild completed.";
-    } else if (data.status === "failed") {
-      statusEl.textContent = "Index rebuild failed: " + (data.error || "Unknown error");
-    } else {
-      statusEl.textContent = "Index rebuild is idle.";
-    }
-  } catch (err) {
-    statusEl.textContent = "Error checking status: " + err.message;
-  }
-}
-
-function pollRebuildStatus() {
-  const interval = setInterval(async () => {
-    try {
-      const res = await fetch("/api/admin/rebuild-index-status", {
-        method: "GET",
-        credentials: "same-origin"
-      });
-      const data = await res.json();
-      const statusEl = document.getElementById("rebuild-status");
-
-      if (data.status === "running") {
-        statusEl.textContent = "Index rebuild is running...";
-      } else if (data.status === "completed") {
-        statusEl.textContent = "Index rebuild completed.";
-        clearInterval(interval);
-      } else if (data.status === "failed") {
-        statusEl.textContent = "Index rebuild failed: " + (data.error || "Unknown error");
-        clearInterval(interval);
-      } else {
-        statusEl.textContent = "Index rebuild is idle.";
-        clearInterval(interval);
-      }
-    } catch (err) {
-      document.getElementById("rebuild-status").textContent =
-        "Error checking status: " + err.message;
-      clearInterval(interval);
-    }
-  }, 5000);
-}
-
-document.getElementById("rebuild-index-btn").addEventListener("click", rebuildIndex);
-document.getElementById("check-rebuild-status-btn").addEventListener("click", checkRebuildStatus);
-</script>
     button { background: #0f766e; color: white; border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; }
     .log { border-top: 1px solid #e2e8f0; padding: 12px 0; }
     .muted { color: #475569; font-size: 13px; }
     .pill { display: inline-block; padding: 4px 8px; background: #e2e8f0; border-radius: 999px; font-size: 12px; margin-right: 6px; }
     .row { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
     .notice { background: #ecfeff; border: 1px solid #a5f3fc; padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
+    @media (max-width: 760px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .grid { grid-template-columns: 1fr; }
+      .header-actions { width: 100%; }
+    }
   </style>
 </head>
 <body>
-<header><strong>Green Builder Bot Editor Console</strong></header>
+<header>
+  <div class="header-title">Green Builder Bot Editor Console</div>
+  <div class="header-actions">
+    <button id="rebuild-index-btn" class="header-btn">Rebuild Index</button>
+    <button id="check-rebuild-status-btn" class="header-btn secondary">Check Status</button>
+    <span id="rebuild-status">Index status: idle</span>
+  </div>
+</header>
+
 <main>
   <div class="notice" id="prefillNotice" style="display:none"></div>
   <div class="grid">
@@ -170,9 +82,63 @@ document.getElementById("check-rebuild-status-btn").addEventListener("click", ch
     </aside>
   </div>
 </main>
+
 <script>
 function escapeHtml(s) {
   return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+async function rebuildIndex() {
+  const statusEl = document.getElementById("rebuild-status");
+  statusEl.textContent = "Starting rebuild...";
+
+  try {
+    const res = await fetch("/api/admin/rebuild-index", {
+      method: "POST",
+      credentials: "same-origin"
+    });
+
+    const data = await res.json();
+    statusEl.textContent = data.message || "Rebuild started.";
+    pollRebuildStatus();
+  } catch (err) {
+    statusEl.textContent = "Error starting rebuild: " + err.message;
+  }
+}
+
+async function checkRebuildStatus() {
+  const statusEl = document.getElementById("rebuild-status");
+
+  try {
+    const res = await fetch("/api/admin/rebuild-index-status", {
+      method: "GET",
+      credentials: "same-origin"
+    });
+
+    const data = await res.json();
+
+    if (data.status === "running") {
+      statusEl.textContent = "Index rebuild is running...";
+    } else if (data.status === "completed") {
+      statusEl.textContent = "Index rebuild completed.";
+    } else if (data.status === "failed") {
+      statusEl.textContent = "Index rebuild failed: " + (data.error || "Unknown error");
+    } else {
+      statusEl.textContent = "Index status: idle";
+    }
+  } catch (err) {
+    statusEl.textContent = "Error checking status: " + err.message;
+  }
+}
+
+function pollRebuildStatus() {
+  const interval = setInterval(async () => {
+    await checkRebuildStatus();
+    const text = document.getElementById("rebuild-status").textContent || "";
+    if (text.includes("completed") || text.includes("failed") || text.includes("idle")) {
+      clearInterval(interval);
+    }
+  }, 5000);
 }
 
 function applyPrefillFromUrl() {
@@ -258,9 +224,13 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   loadCorrections();
 });
 
+document.getElementById("rebuild-index-btn").addEventListener("click", rebuildIndex);
+document.getElementById("check-rebuild-status-btn").addEventListener("click", checkRebuildStatus);
+
 applyPrefillFromUrl();
 loadLogs();
 loadCorrections();
+checkRebuildStatus();
 </script>
 </body>
 </html>
