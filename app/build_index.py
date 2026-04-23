@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List
 
@@ -13,6 +14,12 @@ from app.config import get_settings
 from app.governance import apply_governance
 
 TABLE_NAME = "greenbuilder_chunks"
+
+# Safer defaults for OpenAI embedding rate limits
+EMBED_BATCH_SIZE = 16
+EMBED_MAX_RETRIES = 6
+EMBED_BASE_SLEEP_SECONDS = 5.0
+EMBED_BETWEEN_BATCH_SLEEP_SECONDS = 1.0
 
 
 def normalize_whitespace(text: str) -> str:
@@ -78,7 +85,7 @@ def load_documents(path: Path) -> Iterable[Dict]:
                 yield json.loads(line)
 
 
-def batched(items: List[str], batch_size: int = 64) -> Iterable[List[str]]:
+def batched(items: List[str], batch_size: int = EMBED_BATCH_SIZE) -> Iterable[List[str]]:
     for i in range(0, len(items), batch_size):
         yield items[i : i + batch_size]
 
@@ -124,6 +131,46 @@ def build_embed_text(title: str, category: str | None, chunk: str, url: str) -> 
 
     # HARD SAFETY CAP to avoid OpenAI token limit errors
     return text[:12000]
+
+
+def is_rate_limit_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "429" in message
+        or "rate limit" in message
+        or "rate_limit_exceeded" in message
+        or "tokens per min" in message
+    )
+
+
+def embed_batch_with_retry(client: OpenAI, model: str, batch: List[str], batch_num: int, total_batches: int):
+    for attempt in range(1, EMBED_MAX_RETRIES + 1):
+        try:
+            result = client.embeddings.create(
+                model=model,
+                input=batch,
+            )
+            print(
+                f"Embedded batch {batch_num}/{total_batches} "
+                f"(attempt {attempt}, batch size {len(batch)})"
+            )
+            return [item.embedding for item in result.data]
+
+        except Exception as exc:
+            if not is_rate_limit_error(exc):
+                raise
+
+            sleep_seconds = EMBED_BASE_SLEEP_SECONDS * attempt
+            print(
+                f"Rate limited on batch {batch_num}/{total_batches} "
+                f"(attempt {attempt}/{EMBED_MAX_RETRIES}). "
+                f"Sleeping {sleep_seconds:.1f}s and retrying. Error: {exc}"
+            )
+            time.sleep(sleep_seconds)
+
+    raise RuntimeError(
+        f"Embedding batch {batch_num}/{total_batches} failed after {EMBED_MAX_RETRIES} retries."
+    )
 
 
 def main() -> None:
@@ -174,13 +221,30 @@ def main() -> None:
     texts = [row["embed_text"] for row in rows]
     embeddings: List[List[float]] = []
 
-    for batch in batched(texts):
-        result = client.embeddings.create(
+    all_batches = list(batched(texts, batch_size=EMBED_BATCH_SIZE))
+    total_batches = len(all_batches)
+
+    for idx, batch in enumerate(all_batches, start=1):
+        batch_embeddings = embed_batch_with_retry(
+            client=client,
             model=settings.openai_embedding_model,
-            input=batch,
+            batch=batch,
+            batch_num=idx,
+            total_batches=total_batches,
         )
-        embeddings.extend([item.embedding for item in result.data])
-        print(f"Embedded {len(embeddings)}/{len(texts)}")
+        embeddings.extend(batch_embeddings)
+        print(f"Embedded {len(embeddings)}/{len(texts)} total chunks")
+
+        if idx < total_batches:
+            time.sleep(EMBED_BETWEEN_BATCH_SLEEP_SECONDS)
+
+    if not embeddings:
+        raise RuntimeError("No embeddings were generated. Index build aborted.")
+
+    if len(embeddings) != len(rows):
+        raise RuntimeError(
+            f"Embedding count mismatch: got {len(embeddings)} embeddings for {len(rows)} rows."
+        )
 
     for row, emb in zip(rows, embeddings):
         row["vector"] = emb
