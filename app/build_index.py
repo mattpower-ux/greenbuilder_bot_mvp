@@ -30,12 +30,7 @@ def split_paragraphs(text: str) -> List[str]:
     return parts if parts else [text]
 
 
-def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 220) -> List[str]:
-    """
-    Chunk text more gently than raw fixed slicing.
-    First preserve paragraph blocks where possible, then fall back to
-    overlapping character chunks for oversized sections.
-    """
+def chunk_text(text: str, chunk_size: int = 800, overlap: int = 120) -> List[str]:
     text = normalize_whitespace(text)
     if not text:
         return []
@@ -54,12 +49,9 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 220) -> List[st
             current = candidate
         else:
             chunks.append(current.strip())
-
-            # start next chunk with overlap tail from previous chunk + new paragraph
             tail = current[-overlap:] if overlap > 0 else ""
             current = (tail + "\n\n" + para).strip()
 
-            # if still too large, hard-split
             while len(current) > chunk_size:
                 piece = current[:chunk_size]
                 chunks.append(piece.strip())
@@ -68,7 +60,6 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 220) -> List[st
     if current:
         chunks.append(current.strip())
 
-    # final cleanup / dedupe of tiny accidental repeats
     cleaned: List[str] = []
     seen = set()
     for chunk in chunks:
@@ -87,7 +78,7 @@ def load_documents(path: Path) -> Iterable[Dict]:
                 yield json.loads(line)
 
 
-def batched(items: List[str], batch_size: int = 100) -> Iterable[List[str]]:
+def batched(items: List[str], batch_size: int = 64) -> Iterable[List[str]]:
     for i in range(0, len(items), batch_size):
         yield items[i : i + batch_size]
 
@@ -121,11 +112,6 @@ def normalize_doc(doc: Dict) -> Dict:
 
 
 def build_embed_text(title: str, category: str | None, chunk: str, url: str) -> str:
-    """
-    Embed title + category + chunk text together so retrieval can match
-    page-level concepts like 'Sustainability Symposium' even if the phrase
-    is concentrated in only part of the article.
-    """
     parts = []
     if title:
         parts.append(f"Title: {title}")
@@ -134,7 +120,10 @@ def build_embed_text(title: str, category: str | None, chunk: str, url: str) -> 
     if url:
         parts.append(f"URL: {url}")
     parts.append(f"Content: {chunk}")
-    return "\n".join(parts).strip()
+    text = "\n".join(parts).strip()
+
+    # HARD SAFETY CAP to avoid OpenAI token limit errors
+    return text[:12000]
 
 
 def main() -> None:
@@ -149,7 +138,7 @@ def main() -> None:
         if doc["surface_policy"] == "blocked":
             continue
 
-        chunks = chunk_text(doc["text"], chunk_size=1000, overlap=220)
+        chunks = chunk_text(doc["text"])
 
         for idx, chunk in enumerate(chunks):
             base_id = doc["url"] or doc["title"].replace(" ", "-").lower()
@@ -184,7 +173,8 @@ def main() -> None:
 
     texts = [row["embed_text"] for row in rows]
     embeddings: List[List[float]] = []
-    for batch in batched(texts, batch_size=64):
+
+    for batch in batched(texts):
         result = client.embeddings.create(
             model=settings.openai_embedding_model,
             input=batch,
@@ -196,6 +186,7 @@ def main() -> None:
         row["vector"] = emb
 
     db = lancedb.connect(str(settings.lancedb_dir))
+
     schema = pa.schema(
         [
             pa.field("id", pa.string()),
@@ -221,12 +212,14 @@ def main() -> None:
         db.drop_table(TABLE_NAME)
 
     table = db.create_table(TABLE_NAME, data=rows, schema=schema)
+
     table.create_scalar_index("url")
     table.create_scalar_index("published_at")
     table.create_scalar_index("visibility")
     table.create_scalar_index("surface_policy")
     table.create_scalar_index("title")
     table.create_scalar_index("category")
+
     print(f"Built LanceDB table '{TABLE_NAME}' with {len(rows)} rows")
 
 
