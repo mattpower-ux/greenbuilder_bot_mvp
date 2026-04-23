@@ -6,8 +6,8 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
-from urllib.parse import urljoin, urlparse
+from typing import List, Optional
+from urllib.parse import urlparse
 
 import httpx
 import trafilatura
@@ -16,6 +16,10 @@ from bs4 import BeautifulSoup
 from app.config import get_settings
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+DEBUG_TARGET_PATTERNS = [
+    "green-builder-sustainable-brand-index-2026",
+    "sustainable-brand-index-2026",
+]
 
 
 @dataclass
@@ -57,6 +61,7 @@ def allow_url(url: str) -> bool:
     parsed = urlparse(url)
     if parsed.netloc not in {"www.greenbuildermedia.com", "greenbuildermedia.com"}:
         return False
+
     blocked = [
         "/_hcms/preview/",
         "/hs/manage-preferences/",
@@ -64,8 +69,68 @@ def allow_url(url: str) -> bool:
     ]
     if any(part in url for part in blocked):
         return False
-    likely_content = ["/blog", "/magazine", "/ebooks", "/podcasts", "/vision-house", "/todays-homeowner"]
+
+    likely_content = [
+        "/blog",
+        "/magazine",
+        "/ebooks",
+        "/podcasts",
+        "/vision-house",
+        "/todays-homeowner",
+    ]
     return any(part in parsed.path.lower() for part in likely_content)
+
+
+def normalize_text(text: str) -> str:
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def looks_like_debug_target(url: str) -> bool:
+    lower_url = (url or "").lower()
+    return any(pattern in lower_url for pattern in DEBUG_TARGET_PATTERNS)
+
+
+def extract_best_title(soup: BeautifulSoup, extracted_title: str) -> str:
+    if extracted_title:
+        return extracted_title.strip()
+
+    og_title = soup.find("meta", attrs={"property": "og:title"})
+    if og_title and og_title.get("content"):
+        return og_title["content"].strip()
+
+    twitter_title = soup.find("meta", attrs={"name": "twitter:title"})
+    if twitter_title and twitter_title.get("content"):
+        return twitter_title["content"].strip()
+
+    h1 = soup.find("h1")
+    if h1:
+        h1_text = h1.get_text(" ", strip=True)
+        if h1_text:
+            return h1_text
+
+    if soup.title and soup.title.string:
+        return soup.title.string.strip()
+
+    return "Untitled"
+
+
+def extract_fallback_text(soup: BeautifulSoup) -> str:
+    # Prefer article-like containers first
+    for node in [
+        soup.find("article"),
+        soup.find("main"),
+        soup.find(attrs={"role": "main"}),
+        soup.body,
+    ]:
+        if node:
+            text = node.get_text("\n", strip=True)
+            text = normalize_text(text)
+            if text:
+                return text
+    return ""
 
 
 def extract_metadata(html: str, url: str) -> Doc | None:
@@ -75,21 +140,38 @@ def extract_metadata(html: str, url: str) -> Doc | None:
         include_comments=False,
         output_format="json",
     )
-    if not downloaded:
-        return None
 
-    data = json.loads(downloaded)
-    text = (data.get("text") or "").strip()
-    title = (data.get("title") or "").strip()
+    soup = BeautifulSoup(html, "html.parser")
+
+    extracted_title = ""
+    extracted_text = ""
+
+    if downloaded:
+        try:
+            data = json.loads(downloaded)
+            extracted_title = (data.get("title") or "").strip()
+            extracted_text = normalize_text((data.get("text") or "").strip())
+        except Exception:
+            extracted_title = ""
+            extracted_text = ""
+
+    title = extract_best_title(soup, extracted_title)
+    text = extracted_text
+
+    # Fallback if trafilatura failed or returned too little
+    if not text or len(text) < 500:
+        fallback_text = extract_fallback_text(soup)
+        if len(fallback_text) > len(text):
+            text = fallback_text
+
     if not text or len(text) < 500:
         return None
 
-    soup = BeautifulSoup(html, "html.parser")
     published_at = None
-
     for candidate in [
         soup.find("meta", attrs={"property": "article:published_time"}),
         soup.find("meta", attrs={"name": "article:published_time"}),
+        soup.find("meta", attrs={"property": "og:published_time"}),
         soup.find("time"),
     ]:
         if not candidate:
@@ -126,15 +208,28 @@ async def main() -> None:
 
         print(f"Candidate URLs: {len(urls)}")
         results: List[Doc] = []
+
         for idx, url in enumerate(urls, start=1):
             try:
+                if looks_like_debug_target(url):
+                    print(f"DEBUG TARGET URL REACHED: {url}")
+
                 html = await fetch_text(client, url)
                 doc = extract_metadata(html, url)
+
                 if doc:
                     results.append(doc)
                     print(f"[{idx}/{len(urls)}] kept {url}")
+
+                    if looks_like_debug_target(url):
+                        print(f"DEBUG TARGET TITLE: {doc.title}")
+                        print(f"DEBUG TARGET TEXT LENGTH: {len(doc.text)}")
+                        print(f"DEBUG TARGET PUBLISHED_AT: {doc.published_at}")
+                        print(f"DEBUG TARGET TEXT PREVIEW: {doc.text[:500]}")
                 else:
                     print(f"[{idx}/{len(urls)}] skipped {url}")
+                    if looks_like_debug_target(url):
+                        print("DEBUG TARGET WAS SKIPPED AFTER EXTRACTION")
             except Exception as exc:
                 print(f"[{idx}/{len(urls)}] error {url}: {exc}")
 
