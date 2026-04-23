@@ -43,6 +43,15 @@ HIGH_VALUE_EVENT_PHRASES = [
     "conference and expo",
 ]
 
+FRANCHISE_TERMS = [
+    "brand index",
+    "sustainable brand index",
+    "sustainable products",
+    "green home of the year",
+    "vision house",
+    "symposium",
+]
+
 
 def tokenize(text: str) -> List[str]:
     return [t.lower() for t in WORD_RE.findall(text)]
@@ -103,6 +112,13 @@ def _policy_bonus(item: Dict[str, Any]) -> float:
     return 0.0
 
 
+def extract_year(text: str) -> int | None:
+    match = re.search(r"\b(20\d{2})\b", text or "")
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def is_event_query(question: str) -> bool:
     q_tokens = set(tokenize(question))
     if q_tokens & EVENT_TERMS:
@@ -132,12 +148,10 @@ def title_match_bonus(question: str, item: Dict[str, Any]) -> float:
 
     bonus = 0.0
 
-    # Exact phrase bonus for very important event names
     for phrase in HIGH_VALUE_EVENT_PHRASES:
         if phrase in q and phrase in title:
             bonus += 0.22
 
-    # Title-level token overlap
     title_overlap = keyword_overlap_score(question, title)
     bonus += title_overlap * 0.18
 
@@ -151,7 +165,6 @@ def event_bonus(question: str, item: Dict[str, Any]) -> float:
     haystack = combined_search_text(item).lower()
     bonus = 0.0
 
-    # General event vocabulary
     if "conference" in haystack:
         bonus += 0.04
     if "summit" in haystack:
@@ -167,16 +180,60 @@ def event_bonus(question: str, item: Dict[str, Any]) -> float:
     if "schedule" in haystack or "calendar" in haystack:
         bonus += 0.03
 
-    # High-value GBM event phrase bonus
     for phrase in HIGH_VALUE_EVENT_PHRASES:
         if phrase in haystack:
             bonus += 0.12
 
-    # If the user asked specifically about the sustainability symposium,
-    # reward exact mention anywhere in the chunk.
     q = (question or "").lower()
     if "sustainability symposium" in q and "sustainability symposium" in haystack:
         bonus += 0.35
+
+    return bonus
+
+
+def franchise_bonus(question: str, item: Dict[str, Any]) -> float:
+    q = (question or "").lower()
+    title = (item.get("title", "") or "").lower()
+    url = (item.get("url", "") or "").lower()
+    text = (item.get("text", "") or "").lower()
+
+    year = extract_year(q)
+    bonus = 0.0
+
+    matched_franchise = None
+    for phrase in FRANCHISE_TERMS:
+        if phrase in q:
+            matched_franchise = phrase
+            break
+
+    if not matched_franchise:
+        return 0.0
+
+    # Franchise phrase matches
+    if matched_franchise in title:
+        bonus += 0.25
+    if matched_franchise in url:
+        bonus += 0.15
+    if matched_franchise in text:
+        bonus += 0.08
+
+    # Exact year matches
+    if year:
+        year_str = str(year)
+        if year_str in title:
+            bonus += 0.35
+        if year_str in url:
+            bonus += 0.25
+        if year_str in text:
+            bonus += 0.10
+
+    # Strong combo boost: year + franchise together in title
+    if year and matched_franchise in title and str(year) in title:
+        bonus += 0.45
+
+    # Additional URL combo boost
+    if year and matched_franchise in url and str(year) in url:
+        bonus += 0.20
 
     return bonus
 
@@ -186,8 +243,6 @@ def search(question: str) -> List[Dict[str, Any]]:
     table = get_table()
     embedding = embed_query(question)
 
-    # Pull a wider candidate set before rescoring so buried event chunks
-    # have a better chance to surface.
     candidate_limit = max(settings.top_k * 8, settings.max_context_chunks * 8)
 
     df = table.search(embedding).limit(candidate_limit).to_pandas()
@@ -205,13 +260,15 @@ def search(question: str) -> List[Dict[str, Any]]:
         freshness = recency_boost(item.get("published_at"))
         title_bonus = title_match_bonus(question, item)
         topical_event_bonus = event_bonus(question, item)
+        franchise_match = franchise_bonus(question, item)
 
         final_score = (
-            semantic_score * 0.56
-            + keyword_score * 0.24
+            semantic_score * 0.50
+            + keyword_score * 0.22
             + freshness * 0.08
             + title_bonus
             + topical_event_bonus
+            + franchise_match
             + _policy_bonus(item)
         )
 
@@ -222,7 +279,6 @@ def search(question: str) -> List[Dict[str, Any]]:
             except Exception:
                 item["stale_reasons"] = [item["stale_reasons"]]
 
-        # Penalize stale content, but not so heavily that it wipes out a highly relevant chunk.
         if item.get("stale"):
             final_score -= 0.02
 
