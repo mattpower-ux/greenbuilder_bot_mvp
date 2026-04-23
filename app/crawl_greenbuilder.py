@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -47,6 +47,12 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def parse_dt(value: str | None) -> Optional[datetime]:
     if not value:
         return None
@@ -56,15 +62,21 @@ def parse_dt(value: str | None) -> Optional[datetime]:
         return None
 
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return ensure_utc(parsed)
     except Exception:
         pass
 
     # Date-only fallback
     try:
-        return datetime.strptime(value[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        parsed = datetime.strptime(value[:10], "%Y-%m-%d")
+        return ensure_utc(parsed)
     except Exception:
         return None
+
+
+def min_utc_dt() -> datetime:
+    return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def iso_now() -> str:
@@ -123,7 +135,7 @@ def choose_entries_for_this_run(entries: List[SitemapEntry], full_crawl: bool) -
         # Newest first improves odds of getting the pages that matter most before any block/rate-limit kicks in.
         return sorted(
             entries,
-            key=lambda e: parse_dt(e.lastmod) or datetime.min.replace(tzinfo=timezone.utc),
+            key=lambda e: parse_dt(e.lastmod) or min_utc_dt(),
             reverse=True,
         )
 
@@ -131,7 +143,7 @@ def choose_entries_for_this_run(entries: List[SitemapEntry], full_crawl: bool) -
     # Also crawl newest first for recent runs.
     return sorted(
         recent_entries,
-        key=lambda e: parse_dt(e.lastmod) or datetime.min.replace(tzinfo=timezone.utc),
+        key=lambda e: parse_dt(e.lastmod) or min_utc_dt(),
         reverse=True,
     )
 
