@@ -56,7 +56,7 @@ HTML = """
     <div class="muted">Uploads PDF files to <strong>/data/magazines</strong> on your Render disk.</div>
     <div style="height:10px"></div>
     <div class="upload-row">
-      <input type="file" id="magazine-file" accept="application/pdf" />
+      <input type="file" id="magazine-file" accept="application/pdf" multiple />
       <button id="upload-magazine-btn">Upload PDF</button>
     </div>
     <div id="upload-status">No file uploaded yet.</div>
@@ -227,22 +227,24 @@ async function loadCorrections() {
 async function uploadMagazinePDF() {
   const fileInput = document.getElementById("magazine-file");
   const statusEl = document.getElementById("upload-status");
-  const file = fileInput.files[0];
+  const files = fileInput.files;
 
-  if (!file) {
-    statusEl.textContent = "Choose a PDF first.";
+  if (!files || files.length === 0) {
+    statusEl.textContent = "Choose one or more PDFs first.";
     return;
   }
-
-  if (!file.name.toLowerCase().endsWith(".pdf")) {
-    statusEl.textContent = "Only PDF files are allowed.";
-    return;
-  }
-
-  statusEl.textContent = "Uploading " + file.name + "...";
 
   const formData = new FormData();
-  formData.append("file", file);
+
+  for (const file of files) {
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      statusEl.textContent = "Only PDF files are allowed.";
+      return;
+    }
+    formData.append("files", file);
+  }
+
+  statusEl.textContent = "Uploading " + files.length + " PDF(s)...";
 
   try {
     const res = await fetch("/admin/upload-magazine", {
