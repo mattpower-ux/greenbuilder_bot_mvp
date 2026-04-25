@@ -452,17 +452,25 @@ def chat(req: ChatRequest) -> ChatResponse:
             continue
         seen.add(url)
 
-        source_type = (chunk.get("source_type") or "").lower()
+        is_magazine = str(url).startswith("/magazines/") or "/magazines/" in str(url)
 
-        if source_type == "magazine":
+        if is_magazine:
             clean_title = (
                 chunk.get("source_name")
                 or chunk.get("title")
                 or chunk.get("pdf_filename")
                 or "Green Builder Magazine Archive"
             )
-            if not clean_title.lower().endswith("(pdf)"):
+
+            page = chunk.get("page")
+            if page is not None:
+                try:
+                    clean_title = f"{clean_title} (PDF, p. {int(page)})"
+                except Exception:
+                    clean_title = f"{clean_title} (PDF)"
+            elif not clean_title.lower().endswith("(pdf)"):
                 clean_title = f"{clean_title} (PDF)"
+
             attribution_label = "Magazine archive"
         else:
             clean_title = chunk.get("title", "Untitled")
