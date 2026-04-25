@@ -132,7 +132,15 @@ async function checkRebuildStatus() {
       credentials: "same-origin"
     });
 
-    const data = await res.json();
+    const rawText = await res.text();
+    let data = {};
+
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      statusEl.textContent = "Ingest status failed. Server did not return JSON: " + rawText.slice(0, 400);
+      return;
+    }
 
     if (data.status === "running") {
       statusEl.textContent = "Index rebuild is running...";
@@ -253,10 +261,18 @@ async function uploadMagazinePDF() {
       body: formData
     });
 
-    const data = await res.json();
+    const rawText = await res.text();
+    let data = {};
+
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      statusEl.textContent = "Upload failed. Server did not return JSON: " + rawText.slice(0, 400);
+      return;
+    }
 
     if (!res.ok || data.ok === false) {
-      statusEl.textContent = "Upload failed: " + (data.error || data.detail || "Unknown error");
+      statusEl.textContent = "Upload failed: " + (data.error || data.detail || data.message || "Unknown error");
       return;
     }
 
