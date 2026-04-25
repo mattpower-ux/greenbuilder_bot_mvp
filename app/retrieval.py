@@ -137,13 +137,22 @@ def is_archive_or_date_query(question: str) -> bool:
         return True
     return False
 
+def is_magazine_item(item: Dict[str, Any]) -> bool:
+    url = str(item.get("url", "") or "")
+    return url.startswith("/magazines/") or "/magazines/" in url
+
+
 def source_type_bonus(question: str, item: Dict[str, Any]) -> float:
-    st = (item.get("source_type") or "").lower()
-    if st != "magazine":
+    if not is_magazine_item(item):
         return 0.0
+
+    # Small boost so magazine archive chunks can surface, but blogs still dominate.
     bonus = 0.025
+
+    # Extra lift for year/date/archive-style questions.
     if is_archive_or_date_query(question):
         bonus += 0.055
+
     return bonus
 
 def combined_search_text(item: Dict[str, Any]) -> str:
@@ -306,4 +315,33 @@ def search(question: str) -> List[Dict[str, Any]]:
         rescored.append(item)
 
     rescored.sort(key=lambda x: x["score"], reverse=True)
-    return rescored[: settings.max_context_chunks]
+
+    max_chunks = settings.max_context_chunks
+    archive_query = is_archive_or_date_query(question)
+
+    blogs = [r for r in rescored if not is_magazine_item(r)]
+    magazines = [r for r in rescored if is_magazine_item(r)]
+
+    if archive_query:
+        # Archive/date questions: allow more magazine context.
+        magazine_target = max(1, min(3, max_chunks // 2))
+    else:
+        # Normal questions: allow a small amount of archive support.
+        magazine_target = max(1, min(2, max_chunks // 4))
+
+    blog_target = max_chunks - magazine_target
+    final_results = blogs[:blog_target] + magazines[:magazine_target]
+
+    # Fill remaining slots from the overall ranking, avoiding duplicate chunks.
+    seen_ids = {r.get("id") for r in final_results}
+    for r in rescored:
+        rid = r.get("id")
+        if rid in seen_ids:
+            continue
+        final_results.append(r)
+        seen_ids.add(rid)
+        if len(final_results) >= max_chunks:
+            break
+
+    final_results.sort(key=lambda x: x["score"], reverse=True)
+    return final_results[:max_chunks]
