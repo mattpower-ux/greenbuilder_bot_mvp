@@ -558,3 +558,12 @@ async def upload_magazine(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
 
     return {"ok": True, "message": f"Uploaded {file.filename}"}
+
+# === Serve Magazine PDFs ===
+from fastapi.staticfiles import StaticFiles
+
+app.mount(
+    "/magazines",
+    StaticFiles(directory="/data/magazines"),
+    name="magazines"
+)
