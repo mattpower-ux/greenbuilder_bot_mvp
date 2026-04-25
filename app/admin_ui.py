@@ -26,6 +26,11 @@ HTML = """
     .pill { display: inline-block; padding: 4px 8px; background: #e2e8f0; border-radius: 999px; font-size: 12px; margin-right: 6px; }
     .row { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
     .notice { background: #ecfeff; border: 1px solid #a5f3fc; padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
+
+    .upload-box { margin-top: 14px; padding: 12px; border: 1px dashed #99f6e4; border-radius: 12px; background: #f0fdfa; }
+    .upload-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .upload-row input[type="file"] { flex: 1; min-width: 220px; background: #fff; }
+    #upload-status { margin-top: 8px; font-size: 13px; color: #475569; }
     @media (max-width: 760px) {
       header { align-items: flex-start; flex-direction: column; }
       .grid { grid-template-columns: 1fr; }
@@ -45,6 +50,18 @@ HTML = """
 
 <main>
   <div class="notice" id="prefillNotice" style="display:none"></div>
+
+  <section class="card upload-box">
+    <h2 style="margin-top:0">Upload magazine PDF</h2>
+    <div class="muted">Uploads PDF files to <strong>/data/magazines</strong> on your Render disk.</div>
+    <div style="height:10px"></div>
+    <div class="upload-row">
+      <input type="file" id="magazine-file" accept="application/pdf" />
+      <button id="upload-magazine-btn">Upload PDF</button>
+    </div>
+    <div id="upload-status">No file uploaded yet.</div>
+  </section>
+  <div style="height:18px"></div>
   <div class="grid">
     <section class="card">
       <h2>Recent chatbot answers</h2>
@@ -206,6 +223,48 @@ async function loadCorrections() {
   });
 }
 
+
+async function uploadMagazinePDF() {
+  const fileInput = document.getElementById("magazine-file");
+  const statusEl = document.getElementById("upload-status");
+  const file = fileInput.files[0];
+
+  if (!file) {
+    statusEl.textContent = "Choose a PDF first.";
+    return;
+  }
+
+  if (!file.name.toLowerCase().endsWith(".pdf")) {
+    statusEl.textContent = "Only PDF files are allowed.";
+    return;
+  }
+
+  statusEl.textContent = "Uploading " + file.name + "...";
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const res = await fetch("/admin/upload-magazine", {
+      method: "POST",
+      credentials: "same-origin",
+      body: formData
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || data.ok === false) {
+      statusEl.textContent = "Upload failed: " + (data.error || data.detail || "Unknown error");
+      return;
+    }
+
+    statusEl.textContent = data.message || "Upload complete.";
+    fileInput.value = "";
+  } catch (err) {
+    statusEl.textContent = "Upload error: " + err.message;
+  }
+}
+
 document.getElementById('saveBtn').addEventListener('click', async () => {
   const payload = {
     question_pattern: document.getElementById('question_pattern').value,
@@ -224,6 +283,7 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   loadCorrections();
 });
 
+document.getElementById("upload-magazine-btn").addEventListener("click", uploadMagazinePDF);
 document.getElementById("rebuild-index-btn").addEventListener("click", rebuildIndex);
 document.getElementById("check-rebuild-status-btn").addEventListener("click", checkRebuildStatus);
 
