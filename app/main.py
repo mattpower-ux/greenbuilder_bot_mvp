@@ -7,7 +7,7 @@ import re
 import secrets
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 
 import gspread
 from fastapi import Depends, FastAPI, HTTPException, Response, status
@@ -594,16 +594,30 @@ MAGAZINE_DIR = Path("/data/magazines")
 MAGAZINE_DIR.mkdir(parents=True, exist_ok=True)
 
 @app.post("/admin/upload-magazine")
-async def upload_magazine(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
-        return {"ok": False, "error": "Only PDF files are allowed."}
+async def upload_magazine(files: List[UploadFile] = File(...)):
+    uploaded = []
+    skipped = []
 
-    target = MAGAZINE_DIR / file.filename
+    for file in files:
+        filename = file.filename or ""
 
-    with target.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        if not filename.lower().endswith(".pdf"):
+            skipped.append(filename)
+            continue
 
-    return {"ok": True, "message": f"Uploaded {file.filename}"}
+        target = MAGAZINE_DIR / filename
+
+        with target.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        uploaded.append(filename)
+
+    return {
+        "ok": True,
+        "message": f"Uploaded {len(uploaded)} PDF(s).",
+        "files": uploaded,
+        "skipped": skipped,
+    }
 
 # === Serve Magazine PDFs ===
 from fastapi.staticfiles import StaticFiles
