@@ -128,6 +128,24 @@ def is_event_query(question: str) -> bool:
     return any(phrase in q for phrase in HIGH_VALUE_EVENT_PHRASES)
 
 
+def is_archive_or_date_query(question: str) -> bool:
+    q = (question or "").lower()
+    archive_terms = ["magazine","pdf","issue","archive","older","past","history","historical","previously","back issue"]
+    if any(t in q for t in archive_terms):
+        return True
+    if re.search(r"\b20\d{2}\b", q):
+        return True
+    return False
+
+def source_type_bonus(question: str, item: Dict[str, Any]) -> float:
+    st = (item.get("source_type") or "").lower()
+    if st != "magazine":
+        return 0.0
+    bonus = 0.025
+    if is_archive_or_date_query(question):
+        bonus += 0.055
+    return bonus
+
 def combined_search_text(item: Dict[str, Any]) -> str:
     title = item.get("title", "") or ""
     text = item.get("text", "") or ""
@@ -261,6 +279,7 @@ def search(question: str) -> List[Dict[str, Any]]:
         title_bonus = title_match_bonus(question, item)
         topical_event_bonus = event_bonus(question, item)
         franchise_match = franchise_bonus(question, item)
+        magazine_lift = source_type_bonus(question, item)
 
         final_score = (
             semantic_score * 0.50
@@ -269,6 +288,7 @@ def search(question: str) -> List[Dict[str, Any]]:
             + title_bonus
             + topical_event_bonus
             + franchise_match
+            + magazine_lift
             + _policy_bonus(item)
         )
 
