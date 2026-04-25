@@ -481,12 +481,25 @@ def chat(req: ChatRequest) -> ChatResponse:
             )
         )
 
-    response = ChatResponse(
-        answer=answer,
-        sources=sources[:5],
-        private_archive_used=private_used,
-        attribution_note=attribution_note,
-    )
+# Ensure at least one magazine PDF source appears if magazine chunks were used.
+blog_sources = [s for s in sources if not s.url.startswith("/magazines/")]
+pdf_sources = [s for s in sources if s.url.startswith("/magazines/")]
+
+final_sources = blog_sources[:4]
+
+if pdf_sources:
+    final_sources.append(pdf_sources[0])
+
+# If no PDF source was used, keep normal top 5 behavior.
+if not pdf_sources:
+    final_sources = sources[:5]
+
+response = ChatResponse(
+    answer=answer,
+    sources=final_sources[:5],
+    private_archive_used=private_used,
+    attribution_note=attribution_note,
+)
 
     append_log_everywhere(
         {
