@@ -12,3 +12,4 @@ openai==1.51.0
 orjson==3.10.7
 gspread==6.1.2
 google-auth==2.35.0
+python-multipart
