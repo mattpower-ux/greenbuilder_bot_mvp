@@ -52,8 +52,8 @@ HTML = """
   <div class="notice" id="prefillNotice" style="display:none"></div>
 
   <section class="card upload-box">
-    <h2 style="margin-top:0">Upload magazine PDF</h2>
-    <div class="muted">Uploads PDF files to <strong>/data/magazines</strong> on your Render disk.</div>
+    <h2 style="margin-top:0">Upload magazine PDF(s)</h2>
+    <div class="muted">Uploads PDF files to <strong>/data/magazines</strong> and automatically ingests each uploaded issue.</div>
     <div style="height:10px"></div>
     <div class="upload-row">
       <input type="file" id="magazine-file" accept="application/pdf" multiple />
@@ -260,11 +260,52 @@ async function uploadMagazinePDF() {
       return;
     }
 
-    statusEl.textContent = data.message || "Upload complete.";
+    statusEl.textContent = data.message || "Upload complete. Ingest is running in the background.";
     fileInput.value = "";
+    pollMagazineIngestStatus();
   } catch (err) {
     statusEl.textContent = "Upload error: " + err.message;
   }
+}
+
+async function checkMagazineIngestStatus() {
+  const statusEl = document.getElementById("upload-status");
+
+  try {
+    const res = await fetch("/admin/magazine-ingest-status", {
+      method: "GET",
+      credentials: "same-origin"
+    });
+
+    const data = await res.json();
+
+    if (data.status === "running") {
+      statusEl.textContent = `${data.message || "Ingest running"} — ${data.processed || 0}/${data.total || 0} processed`;
+    } else if (data.status === "completed") {
+      statusEl.textContent = data.message || "Magazine ingest completed.";
+    } else if (data.status === "completed_with_errors") {
+      statusEl.textContent = data.message || "Magazine ingest completed with errors.";
+    } else {
+      statusEl.textContent = data.message || "No magazine ingest is running.";
+    }
+  } catch (err) {
+    statusEl.textContent = "Error checking ingest status: " + err.message;
+  }
+}
+
+function pollMagazineIngestStatus() {
+  const interval = setInterval(async () => {
+    await checkMagazineIngestStatus();
+    const text = document.getElementById("upload-status").textContent || "";
+
+    if (
+      text.includes("completed") ||
+      text.includes("errors") ||
+      text.includes("No magazine ingest")
+    ) {
+      clearInterval(interval);
+    }
+  }, 10000);
 }
 
 document.getElementById('saveBtn').addEventListener('click', async () => {
