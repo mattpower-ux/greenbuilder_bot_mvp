@@ -538,3 +538,23 @@ def root() -> Response:
         "Green Builder Media Retrieval Bot is running.",
         media_type="text/plain",
     )
+
+
+# === Magazine Upload Endpoint ===
+from fastapi import UploadFile, File
+import shutil
+
+MAGAZINE_DIR = Path("/data/magazines")
+MAGAZINE_DIR.mkdir(parents=True, exist_ok=True)
+
+@app.post("/admin/upload-magazine")
+async def upload_magazine(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        return {"ok": False, "error": "Only PDF files are allowed."}
+
+    target = MAGAZINE_DIR / file.filename
+
+    with target.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    return {"ok": True, "message": f"Uploaded {file.filename}"}
