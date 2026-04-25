@@ -433,25 +433,50 @@ def chat(req: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=500, detail=f"Generation failed: {exc}") from exc
 
     private_used, attribution_note = summarize_private_usage(chunks)
+
+    # Build clean, deduplicated public source list.
+    # Blogs are deduplicated by URL.
+    # Magazine PDFs are deduplicated by PDF URL so each issue appears only once.
     seen = set()
     sources = []
     for chunk in chunks:
         visibility = chunk.get("visibility", "public")
         if visibility != "public":
             continue
-        key = chunk.get("url")
-        if not key or key in seen:
+
+        url = chunk.get("url")
+        if not url:
             continue
-        seen.add(key)
+
+        if url in seen:
+            continue
+        seen.add(url)
+
+        source_type = (chunk.get("source_type") or "").lower()
+
+        if source_type == "magazine":
+            clean_title = (
+                chunk.get("source_name")
+                or chunk.get("title")
+                or chunk.get("pdf_filename")
+                or "Green Builder Magazine Archive"
+            )
+            if not clean_title.lower().endswith("(pdf)"):
+                clean_title = f"{clean_title} (PDF)"
+            attribution_label = "Magazine archive"
+        else:
+            clean_title = chunk.get("title", "Untitled")
+            attribution_label = chunk.get("attribution_label")
+
         sources.append(
             SourceItem(
-                title=chunk.get("title", "Untitled"),
-                url=chunk.get("url", ""),
+                title=clean_title,
+                url=url,
                 published_at=chunk.get("published_at"),
                 excerpt=chunk.get("text", "")[:240].strip(),
                 score=float(chunk.get("score", 0.0)),
                 visibility=visibility,
-                attribution_label=chunk.get("attribution_label"),
+                attribution_label=attribution_label,
                 surface_policy=chunk.get("surface_policy"),
             )
         )
