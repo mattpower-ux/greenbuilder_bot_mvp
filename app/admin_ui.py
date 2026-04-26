@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-HTML = """
+HTML = r"""
 <!doctype html>
 <html>
 <head>
