@@ -588,91 +588,45 @@ def root() -> Response:
     )
 
 
-# === Magazine Upload + Auto-Ingest Endpoint ===
+# === Safe Magazine PDF Upload Endpoint ===
 from fastapi import UploadFile, File
+from fastapi.staticfiles import StaticFiles
 import shutil
 
 MAGAZINE_DIR = Path("/data/magazines")
 MAGAZINE_DIR.mkdir(parents=True, exist_ok=True)
 
+# New safe upload inbox. Uploads land here only.
+# They do NOT automatically ingest or touch the live chatbot index.
+PDF_INBOX_DIR = Path("/data/pdf_inbox")
+PDF_INBOX_DIR.mkdir(parents=True, exist_ok=True)
+
 MAGAZINE_INGEST_STATUS_FILE = Path("/data/magazine_ingest_status.json")
 
 
-def write_magazine_ingest_status(payload: dict) -> None:
-    MAGAZINE_INGEST_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        **payload,
-        "updated_at_utc": datetime.utcnow().isoformat(),
-    }
-    MAGAZINE_INGEST_STATUS_FILE.write_text(json.dumps(payload, indent=2))
+def require_data_disk_space(min_free_gb: float = 1.0) -> None:
+    total, used, free = shutil.disk_usage("/data")
+    min_free_bytes = int(min_free_gb * 1024 * 1024 * 1024)
 
-
-def run_uploaded_pdf_ingests(filenames: list[str]) -> None:
-    total = len(filenames)
-    write_magazine_ingest_status({
-        "status": "running",
-        "message": f"Starting ingest for {total} uploaded PDF(s).",
-        "current_file": "",
-        "processed": 0,
-        "total": total,
-        "failed": [],
-    })
-
-    failed = []
-
-    for index, filename in enumerate(filenames, start=1):
-        write_magazine_ingest_status({
-            "status": "running",
-            "message": f"Ingesting {filename} ({index}/{total})",
-            "current_file": filename,
-            "processed": index - 1,
-            "total": total,
-            "failed": failed,
-        })
-
-        try:
-            result = subprocess.run(
-                ["python", "scripts/ingest_one_magazine.py", filename],
-                cwd=Path(__file__).resolve().parents[1],
-                capture_output=True,
-                text=True,
-                timeout=1800,
-            )
-
-            if result.returncode != 0:
-                failed.append({
-                    "file": filename,
-                    "returncode": result.returncode,
-                    "stdout": result.stdout[-2000:],
-                    "stderr": result.stderr[-2000:],
-                })
-        except Exception as exc:
-            failed.append({
-                "file": filename,
-                "error": str(exc),
-            })
-
-        # Give Render memory a little time to settle before the next issue.
-        time.sleep(60)
-
-    final_status = "completed" if not failed else "completed_with_errors"
-    write_magazine_ingest_status({
-        "status": final_status,
-        "message": f"Ingest finished. {total - len(failed)} succeeded; {len(failed)} failed.",
-        "current_file": "",
-        "processed": total,
-        "total": total,
-        "failed": failed,
-    })
+    if free < min_free_bytes:
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                f"Not enough free space on /data. "
+                f"Need at least {min_free_gb} GB free before accepting PDF uploads."
+            ),
+        )
 
 
 @app.post("/admin/upload-magazine")
 async def upload_magazine(
-    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
 ):
     uploaded = []
     skipped = []
+
+    # Safety guard: reject uploads before the disk gets dangerously full.
+    require_data_disk_space(1.0)
 
     for file in files:
         filename = file.filename or ""
@@ -681,19 +635,17 @@ async def upload_magazine(
             skipped.append(filename)
             continue
 
-        target = MAGAZINE_DIR / filename
+        # Save safely to inbox only. Do not auto-ingest.
+        target = PDF_INBOX_DIR / filename
 
         with target.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
         uploaded.append(filename)
 
-    if uploaded:
-        background_tasks.add_task(run_uploaded_pdf_ingests, uploaded)
-
     return {
         "ok": True,
-        "message": f"Uploaded {len(uploaded)} PDF(s). Auto-ingest started.",
+        "message": f"Uploaded {len(uploaded)} PDF(s) safely to /data/pdf_inbox. Auto-ingest is OFF.",
         "files": uploaded,
         "skipped": skipped,
     }
@@ -701,19 +653,19 @@ async def upload_magazine(
 
 @app.get("/admin/magazine-ingest-status")
 def magazine_ingest_status(_: str = Depends(admin_auth)) -> dict:
-    if not MAGAZINE_INGEST_STATUS_FILE.exists():
-        return {"status": "idle", "message": "No magazine ingest has run yet."}
+    return {
+        "status": "idle",
+        "message": "Safe upload mode is ON. PDFs are stored in /data/pdf_inbox. Auto-ingest is OFF.",
+        "current_file": "",
+        "processed": 0,
+        "total": 0,
+        "failed": [],
+    }
 
-    try:
-        return json.loads(MAGAZINE_INGEST_STATUS_FILE.read_text())
-    except Exception as exc:
-        return {"status": "error", "message": f"Could not read ingest status: {exc}"}
 
-# === Serve Magazine PDFs ===
-from fastapi.staticfiles import StaticFiles
-
+# === Serve Magazine PDFs Already Ingested ===
 app.mount(
     "/magazines",
     StaticFiles(directory="/data/magazines"),
-    name="magazines"
+    name="magazines",
 )
