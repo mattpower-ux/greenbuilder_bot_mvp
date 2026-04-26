@@ -53,13 +53,15 @@ HTML = """
 
   <section class="card upload-box">
     <h2 style="margin-top:0">Upload magazine PDF(s)</h2>
-    <div class="muted">Uploads PDF files to <strong>/data/magazines</strong> and automatically ingests each uploaded issue.</div>
+    <div class="muted">Uploads PDF files safely to <strong>/data/pdf_inbox</strong>. They will not be ingested until you click <strong>Ingest PDFs</strong>.</div>
     <div style="height:10px"></div>
     <div class="upload-row">
       <input type="file" id="magazine-file" accept="application/pdf" multiple />
       <button id="upload-magazine-btn">Upload PDF</button>
+      <button id="ingest-pdf-inbox-btn" type="button">Ingest PDFs</button>
+      <button id="check-ingest-status-btn" type="button">Check Ingest Status</button>
     </div>
-    <div id="upload-status">No file uploaded yet.</div>
+    <div id="upload-status">No file uploaded yet. Safe upload mode is ON.</div>
   </section>
   <div style="height:18px"></div>
   <div class="grid">
@@ -276,11 +278,42 @@ async function uploadMagazinePDF() {
       return;
     }
 
-    statusEl.textContent = data.message || "Upload complete. Ingest is running in the background.";
+    statusEl.textContent = data.message || "Upload complete. PDFs are waiting safely in /data/pdf_inbox.";
     fileInput.value = "";
-    pollMagazineIngestStatus();
   } catch (err) {
     statusEl.textContent = "Upload error: " + err.message;
+  }
+}
+
+async function ingestPDFInbox() {
+  const statusEl = document.getElementById("upload-status");
+  statusEl.textContent = "Starting PDF ingest from /data/pdf_inbox...";
+
+  try {
+    const res = await fetch("/admin/ingest-pdf-inbox", {
+      method: "POST",
+      credentials: "same-origin"
+    });
+
+    const rawText = await res.text();
+    let data = {};
+
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      statusEl.textContent = "Ingest failed. Server did not return JSON: " + rawText.slice(0, 400);
+      return;
+    }
+
+    if (!res.ok || data.ok === false) {
+      statusEl.textContent = "Ingest failed: " + (data.error || data.detail || data.message || "Unknown error");
+      return;
+    }
+
+    statusEl.textContent = data.message || "PDF ingest started.";
+    pollMagazineIngestStatus();
+  } catch (err) {
+    statusEl.textContent = "Ingest error: " + err.message;
   }
 }
 
@@ -343,6 +376,8 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
 });
 
 document.getElementById("upload-magazine-btn").addEventListener("click", uploadMagazinePDF);
+document.getElementById("ingest-pdf-inbox-btn").addEventListener("click", ingestPDFInbox);
+document.getElementById("check-ingest-status-btn").addEventListener("click", checkMagazineIngestStatus);
 document.getElementById("rebuild-index-btn").addEventListener("click", rebuildIndex);
 document.getElementById("check-rebuild-status-btn").addEventListener("click", checkRebuildStatus);
 
