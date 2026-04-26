@@ -588,7 +588,7 @@ def root() -> Response:
     )
 
 
-# === Safe Magazine PDF Upload Endpoint ===
+# === Safe Magazine PDF Upload + Controlled Ingest Endpoints ===
 from fastapi import UploadFile, File
 from fastapi.staticfiles import StaticFiles
 import shutil
@@ -596,10 +596,15 @@ import shutil
 MAGAZINE_DIR = Path("/data/magazines")
 MAGAZINE_DIR.mkdir(parents=True, exist_ok=True)
 
-# New safe upload inbox. Uploads land here only.
+# Safe upload folders. Uploads land in pdf_inbox only.
 # They do NOT automatically ingest or touch the live chatbot index.
 PDF_INBOX_DIR = Path("/data/pdf_inbox")
-PDF_INBOX_DIR.mkdir(parents=True, exist_ok=True)
+PDF_PROCESSING_DIR = Path("/data/pdf_processing")
+PDF_DONE_DIR = Path("/data/pdf_done")
+PDF_FAILED_DIR = Path("/data/pdf_failed")
+
+for _folder in [PDF_INBOX_DIR, PDF_PROCESSING_DIR, PDF_DONE_DIR, PDF_FAILED_DIR]:
+    _folder.mkdir(parents=True, exist_ok=True)
 
 MAGAZINE_INGEST_STATUS_FILE = Path("/data/magazine_ingest_status.json")
 
@@ -613,9 +618,188 @@ def require_data_disk_space(min_free_gb: float = 1.0) -> None:
             status_code=507,
             detail=(
                 f"Not enough free space on /data. "
-                f"Need at least {min_free_gb} GB free before accepting PDF uploads."
+                f"Need at least {min_free_gb} GB free before accepting or ingesting PDF uploads."
             ),
         )
+
+
+def write_magazine_ingest_status(payload: dict) -> None:
+    MAGAZINE_INGEST_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        **payload,
+        "updated_at_utc": datetime.utcnow().isoformat(),
+    }
+    MAGAZINE_INGEST_STATUS_FILE.write_text(json.dumps(payload, indent=2))
+
+
+def read_magazine_ingest_status() -> dict:
+    if not MAGAZINE_INGEST_STATUS_FILE.exists():
+        return {
+            "status": "idle",
+            "message": "Safe upload mode is ON. PDFs are stored in /data/pdf_inbox. Auto-ingest is OFF.",
+            "current_file": "",
+            "processed": 0,
+            "total": 0,
+            "failed": [],
+        }
+
+    try:
+        return json.loads(MAGAZINE_INGEST_STATUS_FILE.read_text())
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Could not read ingest status: {exc}",
+            "current_file": "",
+            "processed": 0,
+            "total": 0,
+            "failed": [],
+        }
+
+
+def run_pdf_inbox_ingest(pause_seconds: int = 60) -> None:
+    """Process PDFs from /data/pdf_inbox one at a time."""
+
+    pdfs = sorted(PDF_INBOX_DIR.glob("*.pdf"))
+    total = len(pdfs)
+
+    if total == 0:
+        write_magazine_ingest_status({
+            "status": "idle",
+            "message": "No PDFs waiting in /data/pdf_inbox.",
+            "current_file": "",
+            "processed": 0,
+            "total": 0,
+            "succeeded": [],
+            "skipped": [],
+            "failed": [],
+        })
+        return
+
+    succeeded: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
+
+    write_magazine_ingest_status({
+        "status": "running",
+        "message": f"Starting controlled ingest for {total} PDF(s) from /data/pdf_inbox.",
+        "current_file": "",
+        "processed": 0,
+        "total": total,
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "failed": failed,
+    })
+
+    for index, inbox_file in enumerate(pdfs, start=1):
+        filename = inbox_file.name
+        processing_file = PDF_PROCESSING_DIR / filename
+        magazine_file = MAGAZINE_DIR / filename
+        failed_file = PDF_FAILED_DIR / filename
+        done_marker = PDF_DONE_DIR / f"{filename}.done.txt"
+
+        write_magazine_ingest_status({
+            "status": "running",
+            "message": f"Ingesting {filename} ({index}/{total})",
+            "current_file": filename,
+            "processed": index - 1,
+            "total": total,
+            "succeeded": succeeded,
+            "skipped": skipped,
+            "failed": failed,
+        })
+
+        try:
+            require_data_disk_space(1.0)
+
+            if inbox_file.exists():
+                shutil.move(str(inbox_file), str(processing_file))
+
+            if magazine_file.exists() and magazine_file.stat().st_size > 0:
+                skipped.append({
+                    "file": filename,
+                    "reason": "A PDF with this filename already exists in /data/magazines. Skipped to avoid duplicate ingest.",
+                })
+                if processing_file.exists():
+                    processing_file.unlink()
+                done_marker.write_text(
+                    f"Skipped duplicate on {datetime.utcnow().isoformat()} UTC. Existing file: {magazine_file}\n"
+                )
+                continue
+
+            # The existing ingest script expects the PDF to be in /data/magazines
+            # and receives only the filename.
+            shutil.move(str(processing_file), str(magazine_file))
+
+            result = subprocess.run(
+                ["python", "scripts/ingest_one_magazine.py", filename],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
+
+            if result.returncode != 0:
+                failed.append({
+                    "file": filename,
+                    "returncode": str(result.returncode),
+                    "stdout": result.stdout[-2000:],
+                    "stderr": result.stderr[-2000:],
+                })
+                if magazine_file.exists():
+                    shutil.move(str(magazine_file), str(failed_file))
+            else:
+                succeeded.append({
+                    "file": filename,
+                    "stored_at": str(magazine_file),
+                })
+                done_marker.write_text(
+                    f"Ingested successfully on {datetime.utcnow().isoformat()} UTC. Stored at: {magazine_file}\n"
+                )
+
+        except Exception as exc:
+            failed.append({
+                "file": filename,
+                "error": str(exc),
+            })
+            try:
+                if processing_file.exists():
+                    shutil.move(str(processing_file), str(failed_file))
+                elif magazine_file.exists() and filename not in {item.get("file") for item in succeeded}:
+                    shutil.move(str(magazine_file), str(failed_file))
+            except Exception as move_exc:
+                failed.append({
+                    "file": filename,
+                    "error": f"Also failed while moving bad PDF to failed folder: {move_exc}",
+                })
+
+        write_magazine_ingest_status({
+            "status": "running",
+            "message": f"Finished {filename}. Pausing before next PDF." if index < total else f"Finished {filename}.",
+            "current_file": filename,
+            "processed": index,
+            "total": total,
+            "succeeded": succeeded,
+            "skipped": skipped,
+            "failed": failed,
+        })
+
+        if index < total:
+            time.sleep(pause_seconds)
+
+    final_status = "completed" if not failed else "completed_with_errors"
+    write_magazine_ingest_status({
+        "status": final_status,
+        "message": (
+            f"Controlled ingest finished. "
+            f"{len(succeeded)} succeeded; {len(skipped)} skipped; {len(failed)} failed."
+        ),
+        "current_file": "",
+        "processed": total,
+        "total": total,
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "failed": failed,
+    })
 
 
 @app.post("/admin/upload-magazine")
@@ -625,7 +809,6 @@ async def upload_magazine(
     uploaded = []
     skipped = []
 
-    # Safety guard: reject uploads before the disk gets dangerously full.
     require_data_disk_space(1.0)
 
     for file in files:
@@ -635,7 +818,6 @@ async def upload_magazine(
             skipped.append(filename)
             continue
 
-        # Save safely to inbox only. Do not auto-ingest.
         target = PDF_INBOX_DIR / filename
 
         with target.open("wb") as buffer:
@@ -651,16 +833,51 @@ async def upload_magazine(
     }
 
 
-@app.get("/admin/magazine-ingest-status")
-def magazine_ingest_status(_: str = Depends(admin_auth)) -> dict:
-    return {
-        "status": "idle",
-        "message": "Safe upload mode is ON. PDFs are stored in /data/pdf_inbox. Auto-ingest is OFF.",
+@app.post("/admin/ingest-pdf-inbox")
+async def ingest_pdf_inbox(
+    background_tasks: BackgroundTasks,
+    _: str = Depends(admin_auth),
+) -> dict:
+    current_status = read_magazine_ingest_status()
+    if current_status.get("status") == "running":
+        return {"ok": True, "message": "PDF ingest is already running."}
+
+    pdf_count = len(list(PDF_INBOX_DIR.glob("*.pdf")))
+    if pdf_count == 0:
+        write_magazine_ingest_status({
+            "status": "idle",
+            "message": "No PDFs waiting in /data/pdf_inbox.",
+            "current_file": "",
+            "processed": 0,
+            "total": 0,
+            "succeeded": [],
+            "skipped": [],
+            "failed": [],
+        })
+        return {"ok": True, "message": "No PDFs waiting in /data/pdf_inbox."}
+
+    require_data_disk_space(1.0)
+
+    background_tasks.add_task(run_pdf_inbox_ingest, 60)
+    write_magazine_ingest_status({
+        "status": "running",
+        "message": f"Controlled ingest queued for {pdf_count} PDF(s).",
         "current_file": "",
         "processed": 0,
-        "total": 0,
+        "total": pdf_count,
+        "succeeded": [],
+        "skipped": [],
         "failed": [],
+    })
+    return {
+        "ok": True,
+        "message": f"Controlled ingest started for {pdf_count} PDF(s). Files will process one at a time with a pause between PDFs.",
     }
+
+
+@app.get("/admin/magazine-ingest-status")
+def magazine_ingest_status(_: str = Depends(admin_auth)) -> dict:
+    return read_magazine_ingest_status()
 
 
 # === Serve Magazine PDFs Already Ingested ===
