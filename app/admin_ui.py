@@ -73,6 +73,15 @@ HTML = """
     <div id="upload-status">No file uploaded yet. Safe upload mode is ON.</div>
     <div class="progress-wrap" aria-label="PDF ingest progress"><div id="ingest-progress-bar" class="progress-bar"></div></div>
     <div id="disk-status" class="disk-line">Disk status not checked yet.</div>
+    <div style="margin-top:10px; padding:10px; border:1px solid #fde68a; border-radius:10px; background:#fffbeb;">
+      <strong>Clean unused PDFs</strong>
+      <div class="muted" style="margin-top:4px">Preview and delete PDFs in <strong>/data/magazines</strong> only if they are not indexed and not waiting in the inbox. Indexed PDFs are kept so chatbot download links continue to work.</div>
+      <div style="height:8px"></div>
+      <button id="preview-unused-pdfs-btn" type="button">Preview Unused PDFs</button>
+      <button id="clean-unused-pdfs-btn" type="button">Delete Previewed Unused PDFs</button>
+      <div id="cleanup-status" class="muted" style="margin-top:8px">No cleanup preview yet.</div>
+      <div id="cleanup-list" class="muted" style="margin-top:8px"></div>
+    </div>
     <div class="file-dashboard">
       <div class="file-col"><h4>Inbox</h4><div id="inbox-files" class="muted">Loading...</div></div>
       <div class="file-col"><h4>Processing</h4><div id="processing-files" class="muted">Loading...</div></div>
@@ -426,6 +435,77 @@ function pollMagazineIngestStatus() {
   }, 10000);
 }
 
+async function previewUnusedPDFs() {
+  const statusEl = document.getElementById("cleanup-status");
+  const listEl = document.getElementById("cleanup-list");
+  statusEl.textContent = "Checking for unused PDFs...";
+  listEl.innerHTML = "";
+
+  try {
+    const res = await fetch("/admin/unused-pdf-preview", {
+      method: "GET",
+      credentials: "same-origin"
+    });
+    const data = await res.json();
+
+    if (!res.ok || data.ok === false) {
+      statusEl.textContent = "Preview failed: " + (data.error || data.detail || data.message || "Unknown error");
+      return;
+    }
+
+    const unused = data.unused || [];
+    statusEl.textContent = data.message || `Found ${unused.length} unused PDF(s).`;
+
+    if (!unused.length) {
+      listEl.innerHTML = "<span class='muted'>Nothing to delete.</span>";
+      return;
+    }
+
+    listEl.innerHTML = unused.map(file => `
+      <div class="file-item">
+        <strong>${escapeHtml(file.name || '')}</strong><br />
+        <span class="muted">${escapeHtml(String(file.size_mb ?? ''))} MB</span>
+      </div>
+    `).join('');
+  } catch (err) {
+    statusEl.textContent = "Preview error: " + err.message;
+  }
+}
+
+async function cleanUnusedPDFs() {
+  const statusEl = document.getElementById("cleanup-status");
+  const listEl = document.getElementById("cleanup-list");
+
+  const ok = window.confirm(
+    "Delete unused PDFs from /data/magazines?\n\nThis will NOT delete indexed PDFs used by the chatbot and will NOT delete PDFs waiting in /data/pdf_inbox."
+  );
+  if (!ok) {
+    statusEl.textContent = "Cleanup cancelled.";
+    return;
+  }
+
+  statusEl.textContent = "Deleting unused PDFs...";
+
+  try {
+    const res = await fetch("/admin/clean-unused-pdfs", {
+      method: "POST",
+      credentials: "same-origin"
+    });
+    const data = await res.json();
+
+    if (!res.ok || data.ok === false) {
+      statusEl.textContent = "Cleanup failed: " + (data.error || data.detail || data.message || "Unknown error");
+      return;
+    }
+
+    statusEl.textContent = data.message || "Cleanup complete.";
+    listEl.innerHTML = "";
+    refreshPDFDashboard();
+  } catch (err) {
+    statusEl.textContent = "Cleanup error: " + err.message;
+  }
+}
+
 document.getElementById('saveBtn').addEventListener('click', async () => {
   const payload = {
     question_pattern: document.getElementById('question_pattern').value,
@@ -447,6 +527,8 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
 document.getElementById("upload-magazine-btn").addEventListener("click", uploadMagazinePDF);
 document.getElementById("ingest-pdf-inbox-btn").addEventListener("click", ingestPDFInbox);
 document.getElementById("check-ingest-status-btn").addEventListener("click", checkMagazineIngestStatus);
+document.getElementById("preview-unused-pdfs-btn").addEventListener("click", previewUnusedPDFs);
+document.getElementById("clean-unused-pdfs-btn").addEventListener("click", cleanUnusedPDFs);
 document.getElementById("rebuild-index-btn").addEventListener("click", rebuildIndex);
 document.getElementById("check-rebuild-status-btn").addEventListener("click", checkRebuildStatus);
 
