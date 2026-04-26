@@ -823,6 +823,86 @@ def run_pdf_inbox_ingest(pause_seconds: int = 60) -> None:
         PDF_INGEST_LOCK_FILE.unlink(missing_ok=True)
 
 
+def get_indexed_magazine_filenames() -> set[str]:
+    """Return PDF filenames that are already referenced by the live LanceDB index."""
+    try:
+        import lancedb
+        from urllib.parse import unquote
+
+        db = lancedb.connect("/data/lancedb")
+        table = db.open_table("greenbuilder_chunks")
+        df = table.to_pandas()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read LanceDB index: {exc}") from exc
+
+    indexed: set[str] = set()
+    if "url" not in df.columns:
+        return indexed
+
+    for raw_url in df["url"].dropna().unique():
+        url = str(raw_url)
+        if "/magazines/" not in url:
+            continue
+        filename = Path(unquote(url.split("/magazines/", 1)[1])).name
+        if filename.lower().endswith(".pdf"):
+            indexed.add(filename)
+    return indexed
+
+
+def get_unused_magazine_pdfs() -> list[dict[str, object]]:
+    """List PDFs in /data/magazines that are not indexed and not waiting in /data/pdf_inbox."""
+    indexed = get_indexed_magazine_filenames()
+    inbox = {p.name for p in PDF_INBOX_DIR.glob("*.pdf")}
+    unused = []
+
+    for path in sorted(MAGAZINE_DIR.glob("*.pdf")):
+        if path.name in indexed:
+            continue
+        if path.name in inbox:
+            continue
+        unused.append(pdf_file_info(path))
+
+    return unused
+
+
+@app.get("/admin/unused-pdf-preview")
+def unused_pdf_preview(_: str = Depends(admin_auth)) -> dict:
+    unused = get_unused_magazine_pdfs()
+    indexed = get_indexed_magazine_filenames()
+    on_disk = list(MAGAZINE_DIR.glob("*.pdf"))
+    return {
+        "ok": True,
+        "message": f"Found {len(unused)} unused PDF(s) safe to delete.",
+        "unused": unused,
+        "indexed_count": len(indexed),
+        "magazines_on_disk_count": len(on_disk),
+    }
+
+
+@app.post("/admin/clean-unused-pdfs")
+def clean_unused_pdfs(_: str = Depends(admin_auth)) -> dict:
+    unused = get_unused_magazine_pdfs()
+    deleted = []
+    failed = []
+
+    for item in unused:
+        name = str(item.get("name", ""))
+        path = MAGAZINE_DIR / name
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+                deleted.append(item)
+        except Exception as exc:
+            failed.append({"name": name, "error": str(exc)})
+
+    return {
+        "ok": len(failed) == 0,
+        "message": f"Deleted {len(deleted)} unused PDF(s). {len(failed)} failed.",
+        "deleted": deleted,
+        "failed": failed,
+    }
+
+
 @app.post("/admin/upload-magazine")
 async def upload_magazine(files: List[UploadFile] = File(...)):
     uploaded = []
