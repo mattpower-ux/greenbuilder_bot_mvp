@@ -31,6 +31,15 @@ HTML = """
     .upload-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .upload-row input[type="file"] { flex: 1; min-width: 220px; background: #fff; }
     #upload-status { margin-top: 8px; font-size: 13px; color: #475569; }
+    .progress-wrap { margin-top: 10px; background: #ccfbf1; border-radius: 999px; overflow: hidden; height: 14px; border: 1px solid #99f6e4; }
+    .progress-bar { width: 0%; height: 100%; background: #0f766e; transition: width .3s ease; }
+    .file-dashboard { margin-top: 12px; display: grid; gap: 10px; grid-template-columns: repeat(4, 1fr); }
+    .file-col { background: #ffffff; border: 1px solid #dbeafe; border-radius: 10px; padding: 10px; min-height: 80px; }
+    .file-col h4 { margin: 0 0 6px; font-size: 14px; }
+    .file-item { border-top: 1px solid #e2e8f0; padding: 6px 0; font-size: 12px; overflow-wrap: anywhere; }
+    .disk-line { margin-top: 8px; font-size: 12px; color: #475569; }
+    @media (max-width: 900px) { .file-dashboard { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 560px) { .file-dashboard { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       header { align-items: flex-start; flex-direction: column; }
       .grid { grid-template-columns: 1fr; }
@@ -62,6 +71,14 @@ HTML = """
       <button id="check-ingest-status-btn" type="button">Check Ingest Status</button>
     </div>
     <div id="upload-status">No file uploaded yet. Safe upload mode is ON.</div>
+    <div class="progress-wrap" aria-label="PDF ingest progress"><div id="ingest-progress-bar" class="progress-bar"></div></div>
+    <div id="disk-status" class="disk-line">Disk status not checked yet.</div>
+    <div class="file-dashboard">
+      <div class="file-col"><h4>Inbox</h4><div id="inbox-files" class="muted">Loading...</div></div>
+      <div class="file-col"><h4>Processing</h4><div id="processing-files" class="muted">Loading...</div></div>
+      <div class="file-col"><h4>Done</h4><div id="done-files" class="muted">Loading...</div></div>
+      <div class="file-col"><h4>Failed</h4><div id="failed-files" class="muted">Loading...</div></div>
+    </div>
   </section>
   <div style="height:18px"></div>
   <div class="grid">
@@ -161,6 +178,7 @@ async function checkRebuildStatus() {
 function pollRebuildStatus() {
   const interval = setInterval(async () => {
     await checkRebuildStatus();
+refreshPDFDashboard();
     const text = document.getElementById("rebuild-status").textContent || "";
     if (text.includes("completed") || text.includes("failed") || text.includes("idle")) {
       clearInterval(interval);
@@ -234,6 +252,53 @@ async function loadCorrections() {
 }
 
 
+function renderFileList(elId, files, emptyText) {
+  const el = document.getElementById(elId);
+  const list = files || [];
+  if (!list.length) {
+    el.innerHTML = `<span class="muted">${escapeHtml(emptyText)}</span>`;
+    return;
+  }
+  el.innerHTML = list.map(file => `
+    <div class="file-item">
+      <strong>${escapeHtml(file.name || '')}</strong><br />
+      <span class="muted">${escapeHtml(String(file.size_mb ?? ''))} MB</span>
+    </div>
+  `).join('');
+}
+
+function updateProgressBar(status) {
+  const bar = document.getElementById("ingest-progress-bar");
+  const processed = Number(status?.processed || 0);
+  const total = Number(status?.total || 0);
+  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  bar.style.width = pct + "%";
+}
+
+async function refreshPDFDashboard() {
+  try {
+    const res = await fetch("/admin/pdf-inbox-status", {
+      method: "GET",
+      credentials: "same-origin"
+    });
+    const data = await res.json();
+
+    renderFileList("inbox-files", data.inbox, "No PDFs waiting.");
+    renderFileList("processing-files", data.processing, "Nothing processing.");
+    renderFileList("done-files", data.done, "No done markers yet.");
+    renderFileList("failed-files", data.failed, "No failures.");
+
+    if (data.disk) {
+      document.getElementById("disk-status").textContent =
+        `Disk: ${data.disk.free_gb} GB free of ${data.disk.total_gb} GB on /data`;
+    }
+
+    updateProgressBar(data.status || {});
+  } catch (err) {
+    document.getElementById("disk-status").textContent = "Error loading PDF dashboard: " + err.message;
+  }
+}
+
 async function uploadMagazinePDF() {
   const fileInput = document.getElementById("magazine-file");
   const statusEl = document.getElementById("upload-status");
@@ -280,6 +345,7 @@ async function uploadMagazinePDF() {
 
     statusEl.textContent = data.message || "Upload complete. PDFs are waiting safely in /data/pdf_inbox.";
     fileInput.value = "";
+    refreshPDFDashboard();
   } catch (err) {
     statusEl.textContent = "Upload error: " + err.message;
   }
@@ -311,6 +377,7 @@ async function ingestPDFInbox() {
     }
 
     statusEl.textContent = data.message || "PDF ingest started.";
+    refreshPDFDashboard();
     pollMagazineIngestStatus();
   } catch (err) {
     statusEl.textContent = "Ingest error: " + err.message;
@@ -327,6 +394,7 @@ async function checkMagazineIngestStatus() {
     });
 
     const data = await res.json();
+    updateProgressBar(data || {});
 
     if (data.status === "running") {
       statusEl.textContent = `${data.message || "Ingest running"} — ${data.processed || 0}/${data.total || 0} processed`;
@@ -345,6 +413,7 @@ async function checkMagazineIngestStatus() {
 function pollMagazineIngestStatus() {
   const interval = setInterval(async () => {
     await checkMagazineIngestStatus();
+    await refreshPDFDashboard();
     const text = document.getElementById("upload-status").textContent || "";
 
     if (
@@ -385,6 +454,7 @@ applyPrefillFromUrl();
 loadLogs();
 loadCorrections();
 checkRebuildStatus();
+refreshPDFDashboard();
 </script>
 </body>
 </html>
