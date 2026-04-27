@@ -133,6 +133,24 @@ function escapeHtml(s) {
   return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
+async function fetchJson(url, options = {}) {
+  const res = await fetch(url, {
+    credentials: "same-origin",
+    ...options
+  });
+
+  const rawText = await res.text();
+  let data = {};
+
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch (e) {
+    throw new Error(`Server did not return JSON (${res.status}): ${rawText.slice(0, 400)}`);
+  }
+
+  return { res, data, rawText };
+}
+
 async function rebuildIndex() {
   const statusEl = document.getElementById("rebuild-status");
   statusEl.textContent = "Starting rebuild...";
@@ -442,11 +460,9 @@ async function previewUnusedPDFs() {
   listEl.innerHTML = "";
 
   try {
-    const res = await fetch("/admin/unused-pdf-preview", {
-      method: "GET",
-      credentials: "same-origin"
+    const { res, data } = await fetchJson("/admin/unused-pdf-preview", {
+      method: "GET"
     });
-    const data = await res.json();
 
     if (!res.ok || data.ok === false) {
       statusEl.textContent = "Preview failed: " + (data.error || data.detail || data.message || "Unknown error");
@@ -477,7 +493,7 @@ async function cleanUnusedPDFs() {
   const listEl = document.getElementById("cleanup-list");
 
   const ok = window.confirm(
-    "Delete unused PDFs from /data/magazines?\n\nThis will NOT delete indexed PDFs used by the chatbot and will NOT delete PDFs waiting in /data/pdf_inbox."
+    "Delete unused PDFs from /data/magazines? This will NOT delete indexed PDFs used by the chatbot and will NOT delete PDFs waiting in /data/pdf_inbox."
   );
   if (!ok) {
     statusEl.textContent = "Cleanup cancelled.";
@@ -487,11 +503,9 @@ async function cleanUnusedPDFs() {
   statusEl.textContent = "Deleting unused PDFs...";
 
   try {
-    const res = await fetch("/admin/clean-unused-pdfs", {
-      method: "POST",
-      credentials: "same-origin"
+    const { res, data } = await fetchJson("/admin/clean-unused-pdfs", {
+      method: "POST"
     });
-    const data = await res.json();
 
     if (!res.ok || data.ok === false) {
       statusEl.textContent = "Cleanup failed: " + (data.error || data.detail || data.message || "Unknown error");
@@ -506,7 +520,12 @@ async function cleanUnusedPDFs() {
   }
 }
 
-document.getElementById('saveBtn').addEventListener('click', async () => {
+function bindClick(id, fn) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("click", fn);
+}
+
+bindClick('saveBtn', async () => {
   const payload = {
     question_pattern: document.getElementById('question_pattern').value,
     match_type: document.getElementById('match_type').value,
@@ -516,6 +535,7 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   };
   const res = await fetch('/api/admin/corrections', {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
@@ -524,13 +544,13 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   loadCorrections();
 });
 
-document.getElementById("upload-magazine-btn").addEventListener("click", uploadMagazinePDF);
-document.getElementById("ingest-pdf-inbox-btn").addEventListener("click", ingestPDFInbox);
-document.getElementById("check-ingest-status-btn").addEventListener("click", checkMagazineIngestStatus);
-document.getElementById("preview-unused-pdfs-btn").addEventListener("click", previewUnusedPDFs);
-document.getElementById("clean-unused-pdfs-btn").addEventListener("click", cleanUnusedPDFs);
-document.getElementById("rebuild-index-btn").addEventListener("click", rebuildIndex);
-document.getElementById("check-rebuild-status-btn").addEventListener("click", checkRebuildStatus);
+bindClick("upload-magazine-btn", uploadMagazinePDF);
+bindClick("ingest-pdf-inbox-btn", ingestPDFInbox);
+bindClick("check-ingest-status-btn", checkMagazineIngestStatus);
+bindClick("preview-unused-pdfs-btn", previewUnusedPDFs);
+bindClick("clean-unused-pdfs-btn", cleanUnusedPDFs);
+bindClick("rebuild-index-btn", rebuildIndex);
+bindClick("check-rebuild-status-btn", checkRebuildStatus);
 
 applyPrefillFromUrl();
 loadLogs();
