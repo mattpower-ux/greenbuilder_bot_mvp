@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ MAGAZINE_DIR = Path("/data/magazines")
 QUEUE_DIR = Path("/data/magazines_queue")
 DONE_DIR = Path("/data/magazines_done")
 FAILED_DIR = Path("/data/magazines_failed")
+DOCUMENTS_FILE = Path("/data/documents.jsonl")
 
 # Path to your existing low-memory ingest script
 INGEST_COMMAND = ["python", "scripts/ingest_magazines.py"]
@@ -31,6 +33,72 @@ def ensure_dirs() -> None:
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     DONE_DIR.mkdir(parents=True, exist_ok=True)
     FAILED_DIR.mkdir(parents=True, exist_ok=True)
+    DOCUMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DOCUMENTS_FILE.touch(exist_ok=True)
+
+
+def magazine_url(filename: str) -> str:
+    return f"/magazines/{filename}"
+
+
+def normalize_pdf_document_metadata(filename: str) -> None:
+    """
+    Ensures magazine/PDF records in /data/documents.jsonl are treated as public,
+    citeable magazine sources with usable PDF links.
+
+    This does not create text. It only patches records already written by the
+    ingest script for the current PDF.
+    """
+    if not DOCUMENTS_FILE.exists():
+        return
+
+    changed = 0
+    updated_lines: list[str] = []
+
+    with DOCUMENTS_FILE.open("r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.strip()
+            if not raw:
+                continue
+
+            try:
+                doc = json.loads(raw)
+            except Exception:
+                updated_lines.append(line)
+                continue
+
+            doc_url = str(doc.get("url", ""))
+            doc_pdf = str(doc.get("pdf_filename", ""))
+            doc_title = str(doc.get("title", ""))
+
+            is_current_pdf = (
+                filename in doc_url
+                or filename == doc_pdf
+                or filename in doc_title
+                or doc_url.startswith("/magazines/")
+            )
+
+            if is_current_pdf and (
+                filename in doc_url
+                or filename == doc_pdf
+                or filename in doc_title
+            ):
+                doc["url"] = magazine_url(filename)
+                doc["pdf_filename"] = filename
+                doc["visibility"] = "public"
+                doc["surface_policy"] = "show_source"
+                doc["attribution_label"] = "Magazine archive"
+                doc["source_type"] = "pdf"
+                doc.setdefault("source_name", Path(filename).stem)
+
+                changed += 1
+
+            updated_lines.append(json.dumps(doc, ensure_ascii=False) + "\n")
+
+    with DOCUMENTS_FILE.open("w", encoding="utf-8") as f:
+        f.writelines(updated_lines)
+
+    log(f"Patched {changed} document record(s) for {filename}")
 
 
 def move_current_uploads_to_queue() -> None:
@@ -64,6 +132,8 @@ def run_ingest_for_one(pdf_path: Path) -> bool:
     result = subprocess.run(INGEST_COMMAND)
 
     if result.returncode == 0:
+        normalize_pdf_document_metadata(active_path.name)
+
         log(f"SUCCESS: {active_path.name}")
         shutil.move(str(active_path), str(DONE_DIR / active_path.name))
         return True
@@ -100,7 +170,10 @@ def main() -> None:
         else:
             failed += 1
 
-        log(f"Progress: {processed}/{len(queue)} processed; {succeeded} succeeded; {failed} failed")
+        log(
+            f"Progress: {processed}/{len(queue)} processed; "
+            f"{succeeded} succeeded; {failed} failed"
+        )
 
         if processed < len(queue):
             log(f"Pausing {PAUSE_SECONDS} seconds before next PDF...")
