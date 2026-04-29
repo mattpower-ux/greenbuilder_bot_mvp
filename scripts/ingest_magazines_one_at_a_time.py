@@ -14,13 +14,10 @@ DONE_DIR = Path("/data/magazines_done")
 FAILED_DIR = Path("/data/magazines_failed")
 DOCUMENTS_FILE = Path("/data/documents.jsonl")
 
-# Path to your existing low-memory ingest script
+# Existing low-memory ingest script, kept for backward compatibility
 INGEST_COMMAND = ["python", "scripts/ingest_magazines.py"]
 
-# Pause between issues to let memory settle
 PAUSE_SECONDS = int(os.getenv("PDF_BATCH_PAUSE_SECONDS", "20"))
-
-# Set to a number like 3 for testing, or leave 0 to process all
 MAX_FILES = int(os.getenv("PDF_BATCH_MAX_FILES", "0"))
 
 
@@ -29,10 +26,8 @@ def log(msg: str) -> None:
 
 
 def ensure_dirs() -> None:
-    MAGAZINE_DIR.mkdir(parents=True, exist_ok=True)
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    DONE_DIR.mkdir(parents=True, exist_ok=True)
-    FAILED_DIR.mkdir(parents=True, exist_ok=True)
+    for folder in [MAGAZINE_DIR, QUEUE_DIR, DONE_DIR, FAILED_DIR]:
+        folder.mkdir(parents=True, exist_ok=True)
     DOCUMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     DOCUMENTS_FILE.touch(exist_ok=True)
 
@@ -41,19 +36,61 @@ def magazine_url(filename: str) -> str:
     return f"/magazines/{filename}"
 
 
-def normalize_pdf_document_metadata(filename: str) -> None:
+def extract_pdf_pages(pdf_path: Path) -> list[dict]:
     """
-    Ensures magazine/PDF records in /data/documents.jsonl are treated as public,
-    citeable magazine sources with usable PDF links.
+    Extract one document record per PDF page.
+    Uses PyMuPDF if available.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyMuPDF is required for PDF extraction. Add pymupdf to requirements.txt."
+        ) from exc
 
-    This does not create text. It only patches records already written by the
-    ingest script for the current PDF.
+    records = []
+    filename = pdf_path.name
+    source_name = pdf_path.stem
+
+    doc = fitz.open(pdf_path)
+
+    for page_index, page in enumerate(doc, start=1):
+        text = page.get_text("text").strip()
+
+        if not text:
+            continue
+
+        records.append(
+            {
+                "url": magazine_url(filename),
+                "title": f"{source_name} (PDF, p. {page_index})",
+                "source_name": source_name,
+                "text": text,
+                "published_at": None,
+                "category": "Magazine archive",
+                "visibility": "public",
+                "surface_policy": "show_source",
+                "attribution_label": "Magazine archive",
+                "source_type": "pdf",
+                "pdf_filename": filename,
+                "page": page_index,
+            }
+        )
+
+    doc.close()
+    return records
+
+
+def remove_existing_pdf_records(filename: str) -> int:
+    """
+    Remove old records for this PDF before re-adding clean ones.
+    Prevents duplicates if the script is rerun.
     """
     if not DOCUMENTS_FILE.exists():
-        return
+        return 0
 
-    changed = 0
-    updated_lines: list[str] = []
+    kept_lines = []
+    removed = 0
 
     with DOCUMENTS_FILE.open("r", encoding="utf-8") as f:
         for line in f:
@@ -62,55 +99,46 @@ def normalize_pdf_document_metadata(filename: str) -> None:
                 continue
 
             try:
-                doc = json.loads(raw)
+                record = json.loads(raw)
             except Exception:
-                updated_lines.append(line)
+                kept_lines.append(raw)
                 continue
 
-            doc_url = str(doc.get("url", ""))
-            doc_pdf = str(doc.get("pdf_filename", ""))
-            doc_title = str(doc.get("title", ""))
+            if record.get("pdf_filename") == filename or filename in str(record.get("url", "")):
+                removed += 1
+                continue
 
-            is_current_pdf = (
-                filename in doc_url
-                or filename == doc_pdf
-                or filename in doc_title
-                or doc_url.startswith("/magazines/")
-            )
-
-            if is_current_pdf and (
-                filename in doc_url
-                or filename == doc_pdf
-                or filename in doc_title
-            ):
-                doc["url"] = magazine_url(filename)
-                doc["pdf_filename"] = filename
-                doc["visibility"] = "public"
-                doc["surface_policy"] = "show_source"
-                doc["attribution_label"] = "Magazine archive"
-                doc["source_type"] = "pdf"
-                doc.setdefault("source_name", Path(filename).stem)
-
-                changed += 1
-
-            updated_lines.append(json.dumps(doc, ensure_ascii=False) + "\n")
+            kept_lines.append(json.dumps(record, ensure_ascii=False))
 
     with DOCUMENTS_FILE.open("w", encoding="utf-8") as f:
-        f.writelines(updated_lines)
+        for line in kept_lines:
+            f.write(line + "\n")
 
-    log(f"Patched {changed} document record(s) for {filename}")
+    return removed
+
+
+def append_pdf_records_to_documents(pdf_path: Path) -> int:
+    filename = pdf_path.name
+
+    removed = remove_existing_pdf_records(filename)
+    if removed:
+        log(f"Removed {removed} old document record(s) for {filename}")
+
+    records = extract_pdf_pages(pdf_path)
+
+    with DOCUMENTS_FILE.open("a", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    log(f"Appended {len(records)} public PDF page record(s) for {filename}")
+    return len(records)
 
 
 def move_current_uploads_to_queue() -> None:
-    """
-    Move PDFs currently in /data/magazines into /data/magazines_queue.
-    The batch runner will then move one file at a time back into /data/magazines.
-    """
     for pdf in sorted(MAGAZINE_DIR.glob("*.pdf")):
         target = QUEUE_DIR / pdf.name
         if target.exists():
-            log(f"Queue already has {pdf.name}; removing duplicate from active folder.")
-            pdf.unlink()
+            log(f"Queue already has {pdf.name}; leaving active copy in place.")
         else:
             shutil.move(str(pdf), str(target))
             log(f"Queued: {pdf.name}")
@@ -129,18 +157,26 @@ def run_ingest_for_one(pdf_path: Path) -> bool:
     shutil.move(str(pdf_path), str(active_path))
     log(f"\n=== INGESTING ONE ISSUE: {active_path.name} ===")
 
-    result = subprocess.run(INGEST_COMMAND)
+    try:
+        appended = append_pdf_records_to_documents(active_path)
 
-    if result.returncode == 0:
-        normalize_pdf_document_metadata(active_path.name)
+        if appended == 0:
+            raise RuntimeError("No text pages were extracted from PDF.")
+
+        # Optional legacy ingest, retained but no longer required for documents.jsonl
+        if os.getenv("RUN_LEGACY_PDF_INGEST", "false").lower() in {"1", "true", "yes"}:
+            result = subprocess.run(INGEST_COMMAND)
+            if result.returncode != 0:
+                raise RuntimeError(f"Legacy ingest failed with return code {result.returncode}")
 
         log(f"SUCCESS: {active_path.name}")
-        shutil.move(str(active_path), str(DONE_DIR / active_path.name))
+        shutil.copy2(str(active_path), str(DONE_DIR / active_path.name))
         return True
 
-    log(f"FAILED: {active_path.name} with return code {result.returncode}")
-    shutil.move(str(active_path), str(FAILED_DIR / active_path.name))
-    return False
+    except Exception as exc:
+        log(f"FAILED: {active_path.name}: {exc}")
+        shutil.copy2(str(active_path), str(FAILED_DIR / active_path.name))
+        return False
 
 
 def main() -> None:
@@ -151,6 +187,7 @@ def main() -> None:
     clear_active_folder()
 
     queue = sorted(QUEUE_DIR.glob("*.pdf"))
+
     if MAX_FILES > 0:
         queue = queue[:MAX_FILES]
 
@@ -167,6 +204,10 @@ def main() -> None:
 
         if ok:
             succeeded += 1
+            try:
+                pdf.unlink()
+            except Exception:
+                pass
         else:
             failed += 1
 
