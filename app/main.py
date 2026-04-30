@@ -7,6 +7,7 @@ import re
 import secrets
 import subprocess
 import time
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, List
@@ -327,8 +328,243 @@ def widget() -> FileResponse:
     return FileResponse(widget_path, media_type="application/javascript")
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
+
+def _first_paragraph(text: str) -> str:
+    """Return a compact first paragraph for visual mode."""
+    if not text:
+        return ""
+    parts = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    if not parts:
+        return text.strip()
+    first = parts[0]
+    # Keep the visual opener short enough for card-style UI.
+    if len(first) > 650:
+        sentence_match = re.match(r"^(.{200,650}?[.!?])\s", first + " ")
+        if sentence_match:
+            return sentence_match.group(1).strip()
+        return first[:650].rsplit(" ", 1)[0].strip() + "..."
+    return first
+
+
+def _source_to_dict(source: Any) -> dict[str, Any]:
+    """Convert a SourceItem or dict to a plain JSON-safe dict."""
+    if hasattr(source, "model_dump"):
+        return source.model_dump()
+    if isinstance(source, dict):
+        return dict(source)
+    return {}
+
+
+def _asset_safe_name(value: str) -> str:
+    """Create a predictable filename stem for generated thumbnails/covers."""
+    value = Path(value or "source").name
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-")
+    return value or "source"
+
+
+def _thumb_for_url(url: str) -> str:
+    """Return the local generated thumbnail path for a public blog/article URL."""
+    from urllib.parse import urlparse
+
+    path = urlparse(str(url or "")).path.strip("/")
+    slug = Path(path).name or "article"
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", slug).strip("-") or "article"
+    return f"/assets/thumbs/{slug}.jpg"
+
+
+def _find_chunk_for_source(source: dict[str, Any], chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    url = str(source.get("url", ""))
+    title = str(source.get("title", ""))
+    pdf_filename = str(source.get("pdf_filename", ""))
+
+    for chunk in chunks:
+        chunk_url = str(chunk.get("url", ""))
+        chunk_pdf = str(chunk.get("pdf_filename", ""))
+        if url and chunk_url == url:
+            return chunk
+        if pdf_filename and chunk_pdf == pdf_filename:
+            return chunk
+
+    for chunk in chunks:
+        if title and title in str(chunk.get("title", "")):
+            return chunk
+    return {}
+
+
+def _is_magazine_chunk(chunk: dict[str, Any]) -> bool:
+    url = str(chunk.get("url", ""))
+    source_type = str(chunk.get("source_type", ""))
+    pdf_filename = str(chunk.get("pdf_filename", ""))
+    return (
+        url.startswith("/magazines/")
+        or "/magazines/" in url
+        or source_type == "pdf"
+        or pdf_filename.lower().endswith(".pdf")
+    )
+
+
+def _is_public_chunk(chunk: dict[str, Any]) -> bool:
+    """Surface public GBM URLs and magazine PDFs; keep true private drafts hidden."""
+    url = str(chunk.get("url", "") or "").strip()
+
+    if (
+        url.startswith("https://www.greenbuildermedia.com/")
+        or url.startswith("https://greenbuildermedia.com/")
+        or url.startswith("/magazines/")
+        or "/magazines/" in url
+    ):
+        return True
+
+    visibility = str(chunk.get("visibility", "public") or "public").strip().lower()
+    return visibility not in {"private", "internal", "draft", "hidden", "false", "0"}
+
+
+def _magazine_source_from_chunk(chunk: dict[str, Any]) -> SourceItem | None:
+    """Build a public SourceItem from a retrieved PDF chunk.
+
+    This is a fallback safety net: even if a PDF chunk was missed by the normal
+    source-building pass, magazine/PDF chunks should still be allowed to surface
+    because they are public archive material, not private draft material.
+    """
+    if not _is_magazine_chunk(chunk):
+        return None
+
+    visibility = chunk.get("visibility", "public")
+    if visibility != "public":
+        return None
+
+    filename = str(chunk.get("pdf_filename", "")).strip()
+    url = str(chunk.get("url", "")).strip()
+
+    if not url and filename:
+        url = f"/magazines/{filename}"
+    if not url:
+        return None
+
+    clean_title = (
+        chunk.get("source_name")
+        or chunk.get("title")
+        or chunk.get("pdf_filename")
+        or "Green Builder Magazine Archive"
+    )
+
+    page = chunk.get("page")
+    if page is not None:
+        try:
+            clean_title = f"{clean_title} (PDF, p. {int(page)})"
+        except Exception:
+            clean_title = f"{clean_title} (PDF)"
+    elif not str(clean_title).lower().endswith("(pdf)"):
+        clean_title = f"{clean_title} (PDF)"
+
+    return SourceItem(
+        title=str(clean_title),
+        url=url,
+        published_at=chunk.get("published_at"),
+        excerpt=str(chunk.get("text", ""))[:240].strip(),
+        score=float(chunk.get("score", 0.0)),
+        visibility="public",
+        attribution_label="Magazine archive",
+        surface_policy="show_source",
+    )
+
+
+def _build_visual_cards(sources: list[Any], chunks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build visual article cards and magazine cards from public sources."""
+    cards: list[dict[str, Any]] = []
+    magazines: list[dict[str, Any]] = []
+
+    for raw_source in sources:
+        source = _source_to_dict(raw_source)
+        url = str(source.get("url", ""))
+        title = source.get("title") or "Green Builder Media source"
+        excerpt = source.get("excerpt") or ""
+        chunk = _find_chunk_for_source(source, chunks)
+        image = (
+            chunk.get("image")
+            or chunk.get("featured_image")
+            or chunk.get("og_image")
+            or chunk.get("thumbnail")
+            or ""
+        )
+
+        if url.startswith("/magazines/") or "/magazines/" in url or str(source.get("source_type", "")) == "pdf":
+            filename = _asset_safe_name(url)
+            stem = Path(filename).stem
+            magazines.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "cover": f"/assets/covers/{stem}.jpg",
+                    "issue": chunk.get("source_name") or source.get("attribution_label") or "Magazine archive",
+                    "page": chunk.get("page"),
+                    "type": "pdf",
+                    "source": "Green Builder Magazine",
+                    "excerpt": excerpt,
+                }
+            )
+        else:
+            local_thumb = _thumb_for_url(url)
+            cards.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "source": source.get("attribution_label") or "Green Builder",
+                    "category": chunk.get("category") or source.get("attribution_label") or "Article",
+                    "image": local_thumb or image or "/assets/thumbs/fallback-article.jpg",
+                    "type": "blog",
+                    "excerpt": excerpt,
+                }
+            )
+
+    return cards[:6], magazines[:3]
+
+
+def _build_key_insights(answer: str) -> list[dict[str, str]]:
+    """Create lightweight insight cards from the generated answer."""
+    text = answer or ""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    insights: list[dict[str, str]] = []
+
+    titles = ["Main takeaway", "Practical implication", "Tradeoff to consider"]
+    icons = ["lightbulb", "check-circle", "scale"]
+
+    for idx, paragraph in enumerate(paragraphs[:3]):
+        short = paragraph
+        if len(short) > 260:
+            match = re.match(r"^(.{120,260}?[.!?])\s", short + " ")
+            short = match.group(1).strip() if match else short[:260].rsplit(" ", 1)[0].strip() + "..."
+        insights.append({"title": titles[idx], "text": short, "icon": icons[idx]})
+
+    if not insights and text:
+        insights.append({"title": "Main takeaway", "text": _first_paragraph(text), "icon": "lightbulb"})
+
+    return insights
+
+
+def _chat_payload(response: ChatResponse, chunks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Return the backward-compatible answer plus visual-mode fields."""
+    chunks = chunks or []
+    base = response.model_dump()
+    answer = base.get("answer", "") or ""
+    sources = base.get("sources", []) or []
+    cards, magazines = _build_visual_cards(sources, chunks)
+
+    base.update(
+        {
+            "visual_summary": _first_paragraph(answer),
+            "key_insights": _build_key_insights(answer),
+            "cards": cards,
+            "magazines": magazines,
+            "text_only_answer": answer,
+            "ui_mode_default": "visual",
+        }
+    )
+    return base
+
+
+@app.post("/chat")
+def chat(req: ChatRequest) -> dict[str, Any]:
     correction = find_correction(req.question)
     if correction:
         response = ChatResponse(
@@ -353,7 +589,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 "correction_id": correction.get("id"),
             }
         )
-        return response
+        return _chat_payload(response)
 
     try:
         chunks = search(req.question)
@@ -380,7 +616,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "private_archive_used": False,
                 }
             )
-            return response
+            return _chat_payload(response)
         raise HTTPException(status_code=500, detail=f"Search failed: {exc}") from exc
 
     future_query = is_future_event_query(req.question)
@@ -407,7 +643,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "private_archive_used": False,
                 }
             )
-            return response
+            return _chat_payload(response)
 
     if not chunks:
         response = ChatResponse(
@@ -427,7 +663,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 "private_archive_used": False,
             }
         )
-        return response
+        return _chat_payload(response)
 
     try:
         answer = answer_question(req.question, chunks)
@@ -441,20 +677,10 @@ def chat(req: ChatRequest) -> ChatResponse:
     # Magazine PDFs are deduplicated by PDF URL so each issue appears only once.
     seen = set()
     sources = []
-for chunk in chunks:
-    url = str(chunk.get("url", "") or "")
-
-    is_public_gbm_url = (
-        url.startswith("https://www.greenbuildermedia.com/")
-        or url.startswith("https://greenbuildermedia.com/")
-        or url.startswith("/magazines/")
-        or "/magazines/" in url
-    )
-
-    visibility = chunk.get("visibility", "public")
-
-    if visibility != "public" and not is_public_gbm_url:
-        continue
+    for chunk in chunks:
+        if not _is_public_chunk(chunk):
+            continue
+        visibility = "public"
 
         url = chunk.get("url")
         if not url:
@@ -464,7 +690,7 @@ for chunk in chunks:
             continue
         seen.add(url)
 
-        is_magazine = str(url).startswith("/magazines/") or "/magazines/" in str(url)
+        is_magazine = _is_magazine_chunk(chunk)
 
         if is_magazine:
             clean_title = (
@@ -501,9 +727,22 @@ for chunk in chunks:
             )
         )
 
-    # Ensure at least one magazine PDF source appears if magazine chunks were used.
+    # Ensure magazine PDF sources appear if magazine chunks were used.
+    # This fallback matters because PDFs are public archive content and must not
+    # be hidden like private draft HTML, even when private archive material also
+    # influenced the answer.
     blog_sources = [s for s in sources if not s.url.startswith("/magazines/")]
     pdf_sources = [s for s in sources if s.url.startswith("/magazines/")]
+
+    if not pdf_sources:
+        seen_pdf_urls = {s.url for s in pdf_sources}
+        for chunk in chunks:
+            pdf_source = _magazine_source_from_chunk(chunk)
+            if pdf_source and pdf_source.url not in seen_pdf_urls:
+                pdf_sources.append(pdf_source)
+                seen_pdf_urls.add(pdf_source.url)
+            if len(pdf_sources) >= 3:
+                break
 
     final_sources = blog_sources[:4]
 
@@ -535,7 +774,7 @@ for chunk in chunks:
             "attribution_note": attribution_note,
         }
     )
-    return response
+    return _chat_payload(response, chunks)
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -1007,5 +1246,121 @@ def magazine_ingest_status(_: str = Depends(admin_auth)) -> dict:
     return read_magazine_ingest_status()
 
 
-# === Serve Magazine PDFs Already Ingested ===
+# === Draft HTML / ZIP Upload Endpoint ===
+@app.post("/admin/upload-draft-html")
+async def upload_draft_html(files: List[UploadFile] = File(...), _: str = Depends(admin_auth)) -> dict:
+    """Upload saved HubSpot/HTML draft files or ZIP archives to /data/draft_html.
+
+    - Individual .html/.htm files are stored directly.
+    - .zip files are saved temporarily, safely extracted, and then removed.
+    - This only stores/extracts files. It does not parse them, ingest them, or rebuild the index.
+    """
+    target_dir = Path("/data/draft_html")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    uploaded: list[str] = []
+    extracted: list[str] = []
+    skipped: list[str] = []
+    failed: list[dict[str, str]] = []
+
+    def safe_extract_zip(zip_path: Path, destination: Path) -> list[str]:
+        """Extract a ZIP file while preventing path traversal attacks."""
+        extracted_files: list[str] = []
+        destination_resolved = destination.resolve()
+
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            for member in archive.infolist():
+                member_name = member.filename
+
+                if member.is_dir():
+                    continue
+                if not member_name.lower().endswith((".html", ".htm")):
+                    continue
+
+                # Flatten nested folders so every HTML file lands directly in /data/draft_html.
+                clean_name = Path(member_name).name
+                if not clean_name:
+                    continue
+
+                target_path = destination / clean_name
+                target_resolved = target_path.resolve()
+
+                if not str(target_resolved).startswith(str(destination_resolved)):
+                    raise RuntimeError(f"Unsafe ZIP path skipped: {member_name}")
+
+                # Avoid silent overwrites.
+                if target_path.exists():
+                    stem = target_path.stem
+                    suffix = target_path.suffix
+                    target_path = destination / f"{stem}-{int(time.time())}{suffix}"
+
+                with archive.open(member, "r") as source, target_path.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+
+                extracted_files.append(target_path.name)
+
+        return extracted_files
+
+    for file in files:
+        raw_filename = file.filename or ""
+        filename = Path(raw_filename).name
+
+        if not filename:
+            skipped.append("unnamed file")
+            continue
+
+        try:
+            lower_name = filename.lower()
+
+            if lower_name.endswith(".zip"):
+                temp_zip = target_dir / f"upload-{int(time.time())}-{filename}"
+
+                with temp_zip.open("wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
+
+                extracted_files = safe_extract_zip(temp_zip, target_dir)
+                temp_zip.unlink(missing_ok=True)
+
+                uploaded.append(filename)
+                extracted.extend(extracted_files)
+
+            elif lower_name.endswith((".html", ".htm")):
+                target = target_dir / filename
+
+                if target.exists():
+                    stem = target.stem
+                    suffix = target.suffix
+                    target = target_dir / f"{stem}-{int(time.time())}{suffix}"
+
+                with target.open("wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
+
+                uploaded.append(target.name)
+
+            else:
+                skipped.append(filename)
+
+        except Exception as exc:
+            failed.append({"file": filename, "error": str(exc)})
+
+    return {
+        "ok": len(failed) == 0,
+        "message": (
+            f"Stored {len(uploaded)} uploaded item(s); "
+            f"extracted {len(extracted)} HTML file(s) into /data/draft_html. "
+            "This endpoint does not ingest or rebuild the index."
+        ),
+        "uploaded": uploaded,
+        "extracted_count": len(extracted),
+        "extracted_sample": extracted[:20],
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+# === Serve Generated Assets and Magazine PDFs Already Ingested ===
+ASSETS_DIR = Path("/data/assets")
+(ASSETS_DIR / "thumbs").mkdir(parents=True, exist_ok=True)
+(ASSETS_DIR / "covers").mkdir(parents=True, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 app.mount("/magazines", StaticFiles(directory="/data/magazines"), name="magazines")
