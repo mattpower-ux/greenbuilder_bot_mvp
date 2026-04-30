@@ -441,10 +441,20 @@ def chat(req: ChatRequest) -> ChatResponse:
     # Magazine PDFs are deduplicated by PDF URL so each issue appears only once.
     seen = set()
     sources = []
-    for chunk in chunks:
-        visibility = chunk.get("visibility", "public")
-        if visibility != "public":
-            continue
+for chunk in chunks:
+    url = str(chunk.get("url", "") or "")
+
+    is_public_gbm_url = (
+        url.startswith("https://www.greenbuildermedia.com/")
+        or url.startswith("https://greenbuildermedia.com/")
+        or url.startswith("/magazines/")
+        or "/magazines/" in url
+    )
+
+    visibility = chunk.get("visibility", "public")
+
+    if visibility != "public" and not is_public_gbm_url:
+        continue
 
         url = chunk.get("url")
         if not url:
